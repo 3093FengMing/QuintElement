@@ -30,7 +30,7 @@ toml = { workspace = true }
 minecraft-msa-auth = "0.5.0"
 oauth2 = { version = "5.0.0", default-features = false, features = [
     "reqwest",
-    "rustls-tls",
+    "native-tls",
 ] }
 
 [target.'cfg(windows)'.dependencies]
