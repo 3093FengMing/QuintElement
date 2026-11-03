@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use elemental_schema::forge::ForgeInstallerProfile;
 
 use crate::{
@@ -36,7 +36,11 @@ impl InstallerFamily for ForgeFamily {
     ) -> Result<(String, LoaderVersionId)> {
         let (game_version, raw_version) =
             profile_game_and_raw_loader_version(install_profile, Self::FAMILY_NAME, "forge")?;
-        let (_, loader_version) = parse_installer_version(raw_version.as_str())?;
+        let (coordinate_game, loader_version) = parse_installer_version(raw_version.as_str())?;
+        ensure!(
+            coordinate_game == game_version,
+            "forge installer Minecraft version '{coordinate_game}' conflicts with profile version '{game_version}'"
+        );
         Ok((game_version, LoaderVersionId::from(loader_version)))
     }
 }

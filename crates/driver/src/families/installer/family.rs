@@ -171,7 +171,7 @@ where
             return F::default_artifact_url(&self.endpoints, artifact_path);
         }
 
-        F::rewrite_upstream(&self.endpoints, raw_url)
+        self.rewrite_upstream(raw_url)
     }
 }
 

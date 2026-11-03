@@ -128,6 +128,11 @@ pub fn forge_installer_relative_path(version: &str) -> PathBuf {
 pub fn parse_installer_version(version: &str) -> Result<(String, String)> {
     version
         .split_once('-')
-        .map(|(game_version, loader_version)| (game_version.to_owned(), loader_version.to_owned()))
+        .map(|(game_version, loader_version)| {
+            let loader_version = loader_version
+                .strip_prefix("forge-")
+                .unwrap_or(loader_version);
+            (game_version.to_owned(), loader_version.to_owned())
+        })
         .context(format!("forge installer version is invalid: {version}"))
 }

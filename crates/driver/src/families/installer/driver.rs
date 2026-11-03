@@ -10,6 +10,7 @@ use elemental_core::{
     storage::{Storage, layout::Layout},
 };
 use elemental_infra::downloader::core::ElementalDownloader;
+use elemental_schema::mojang::piston::PistonMetaData;
 
 use crate::{
     driver::{Driver, DriverDescriptor, InstalledDriver},
@@ -31,6 +32,10 @@ use crate::{
 pub trait InstallerFamilyDriverSpec: InstallerFamily {
     const DRIVER: DriverDescriptor;
     const INSPECT_PREFIXES: &'static [&'static str];
+
+    fn inspect_installed(metadata: &PistonMetaData) -> Option<InstalledDriver> {
+        LibraryPrefixSet::new(Self::INSPECT_PREFIXES).installed_driver(metadata, Self::DRIVER)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +218,6 @@ where
             return Ok(None);
         };
 
-        Ok(LibraryPrefixSet::new(F::INSPECT_PREFIXES).installed_driver(metadata, F::DRIVER))
+        Ok(F::inspect_installed(metadata))
     }
 }
