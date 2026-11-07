@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use elemental_core::{launcher::command::LaunchCommand, runtime::distribution::Distribution};
+use elemental_driver::drivers::outlands::driver::PreparedOutlandsVersion;
 use elemental_driver::{
     driver::{DriverDescriptor, InstalledDriver},
     drivers::{
@@ -52,6 +53,7 @@ where
     Rift(PreparedRiftVersion<L, VL>),
     Forge(PreparedForgeVersion<L, VL>),
     Cleanroom(PreparedCleanroomVersion<L, VL>),
+    Outlands(PreparedOutlandsVersion<L, VL>),
     NeoForge(PreparedNeoForgeVersion<L, VL>),
 }
 
@@ -89,6 +91,9 @@ where
                 prepared.resolved_version.instance.path.as_path()
             }
             PreparedInstanceKind::Cleanroom(prepared) => {
+                prepared.resolved_version.instance.path.as_path()
+            }
+            PreparedInstanceKind::Outlands(prepared) => {
                 prepared.resolved_version.instance.path.as_path()
             }
             PreparedInstanceKind::NeoForge(prepared) => {

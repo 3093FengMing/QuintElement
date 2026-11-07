@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
 use elemental_core::{
     minecraft::MinecraftVersionId,
     runtime::distribution::Distribution,
@@ -13,10 +12,7 @@ use elemental_core::{
         layout::{Layout, Layoutable},
     },
 };
-use elemental_infra::downloader::{
-    core::ElementalDownloader,
-    task::{DownloadExecutionPolicy, DownloadPlan},
-};
+use elemental_infra::downloader::{DownloadBatch, DownloadSession};
 use elemental_schema::{
     forge::ForgeInstallerProfile,
     mojang::piston::{
@@ -30,6 +26,7 @@ use tokio::fs::create_dir_all;
 
 use crate::{
     drivers::vanilla::source::{VanillaSource, resolve_vanilla_metadata},
+    error::{Error, Result},
     families::{
         installer::{InstallerArchive, InstallerArtifact, installer_client_processors_ready},
         version_json::{
@@ -101,25 +98,22 @@ impl<'a> InstallerStatePaths<'a> {
     fn load(self) -> Result<InstallerPersistedState> {
         let install_profile_path = self.install_profile_path();
         let install_profile = serde_json::from_reader(std::fs::File::open(&install_profile_path)?)
-            .with_context(|| {
-                format!(
-                    "read persisted {} install profile failed: {}",
-                    self.family_name,
-                    install_profile_path.display()
-                )
+            .map_err(|source| Error::ReadPersistedInstallProfile {
+                family_name: self.family_name.to_owned(),
+                path: install_profile_path.clone(),
+                source,
             })?;
 
         let embedded_version_path = self.embedded_version_path();
         let embedded_version = if embedded_version_path.exists() {
             Some(
-                serde_json::from_reader(std::fs::File::open(&embedded_version_path)?)
-                    .with_context(|| {
-                        format!(
-                            "read persisted {} embedded version failed: {}",
-                            self.family_name,
-                            embedded_version_path.display()
-                        )
-                    })?,
+                serde_json::from_reader(std::fs::File::open(&embedded_version_path)?).map_err(
+                    |source| Error::ReadPersistedEmbeddedVersion {
+                        family_name: self.family_name.to_owned(),
+                        path: embedded_version_path.clone(),
+                        source,
+                    },
+                )?,
             )
         } else {
             None
@@ -133,11 +127,12 @@ impl<'a> InstallerStatePaths<'a> {
 
     async fn persist_install_profile(self, install_profile: &ForgeInstallerProfile) -> Result<()> {
         let path = self.install_profile_path();
-        let parent = path.parent().with_context(|| {
-            format!(
+        let parent = path.parent().ok_or_else(|| Error::MissingParentDirectory {
+            context: format!(
                 "{} install profile path has no parent directory",
                 self.family_name
-            )
+            ),
+            path: path.clone(),
         })?;
         create_dir_all(parent).await?;
         tokio::fs::write(path, serde_json::to_vec_pretty(install_profile)?).await?;
@@ -150,11 +145,12 @@ impl<'a> InstallerStatePaths<'a> {
     ) -> Result<()> {
         let path = self.embedded_version_path();
         if let Some(version) = embedded_version {
-            let parent = path.parent().with_context(|| {
-                format!(
+            let parent = path.parent().ok_or_else(|| Error::MissingParentDirectory {
+                context: format!(
                     "{} embedded version path has no parent directory",
                     self.family_name
-                )
+                ),
+                path: path.clone(),
             })?;
             create_dir_all(parent).await?;
             tokio::fs::write(path, serde_json::to_vec_pretty(version)?).await?;
@@ -190,8 +186,8 @@ impl InstallerProfileIdentity {
                     .as_ref()
                     .and_then(|legacy| legacy.minecraft.clone())
             })
-            .with_context(|| {
-                format!("{family_name} install profile is missing minecraft version")
+            .ok_or_else(|| Error::InstallerProfileMinecraftVersionMissing {
+                family_name: family_name.to_owned(),
             })?;
 
         let raw_loader_version = install_profile
@@ -205,8 +201,9 @@ impl InstallerProfileIdentity {
             })
             .and_then(|coordinate| coordinate.split(':').nth(2).map(ToOwned::to_owned))
             .or_else(|| install_profile.version.clone())
-            .with_context(|| {
-                format!("{family_name} install profile is missing {loader_name} version identity")
+            .ok_or_else(|| Error::InstallerProfileLoaderVersionMissing {
+                family_name: family_name.to_owned(),
+                loader_name: loader_name.to_owned(),
             })?;
 
         Ok(Self {
@@ -222,19 +219,19 @@ impl InstallerProfileIdentity {
         family_name: &str,
     ) -> Result<()> {
         if self.game_version != expected_game_version {
-            bail!(
-                "{family_name} installer game version '{}' does not match requested game version '{}'",
-                self.game_version,
-                expected_game_version
-            );
+            return Err(Error::InstallerGameVersionMismatch {
+                family_name: family_name.to_owned(),
+                actual: self.game_version.clone(),
+                expected: expected_game_version.to_owned(),
+            });
         }
 
         if &self.loader_version != expected_loader_version {
-            bail!(
-                "{family_name} installer loader version '{}' does not match requested loader version '{}'",
-                self.loader_version,
-                expected_loader_version
-            );
+            return Err(Error::InstallerLoaderVersionMismatch {
+                family_name: family_name.to_owned(),
+                actual: self.loader_version.to_string(),
+                expected: expected_loader_version.to_string(),
+            });
         }
 
         Ok(())
@@ -257,31 +254,16 @@ pub fn read_embedded_version<P: AsRef<Path>>(
     Ok(Some(
         archive
             .read_json::<serde_json::Value>(json_path)
-            .with_context(|| {
-                format!("read {family_name} embedded version json failed: {json_path}")
+            .map_err(|source| Error::ReadEmbeddedVersionJson {
+                family_name: family_name.to_owned(),
+                path: json_path.to_owned(),
+                source: Box::new(source),
             })?,
     ))
 }
 
-pub async fn ensure_installer_artifact_downloaded(
-    downloader: &ElementalDownloader,
-    installer_artifact: &InstallerArtifact,
-    family_name: &str,
-) -> Result<()> {
-    downloader
-        .run_plan(DownloadPlan::named(
-            format!("{family_name}-installer-{}", installer_artifact.coordinate),
-            DownloadExecutionPolicy::ServiceDefault,
-            vec![installer_artifact.download_task()],
-        )?)
-        .await
-        .with_context(|| format!("download {family_name} installer failed"))?;
-
-    Ok(())
-}
-
 pub async fn prepare_installer_state<V>(
-    downloader: &ElementalDownloader,
+    session: &DownloadSession,
     installer_artifact: &InstallerArtifact,
     instance_root: &Path,
     libraries_root: &Path,
@@ -291,14 +273,48 @@ pub async fn prepare_installer_state<V>(
 where
     V: Fn(&ForgeInstallerProfile) -> Result<()>,
 {
-    ensure_installer_artifact_downloaded(downloader, installer_artifact, family_name).await?;
+    session
+        .submit(DownloadBatch::new(vec![installer_artifact.download_task()]).group("installer"))
+        .await
+        .map_err(|source| Error::DownloadInstaller {
+            family_name: family_name.to_owned(),
+            source,
+        })?;
+    session
+        .wait_idle()
+        .await
+        .map_err(|source| Error::DownloadInstaller {
+            family_name: family_name.to_owned(),
+            source,
+        })?;
 
+    read_installer_state(
+        installer_artifact,
+        instance_root,
+        libraries_root,
+        family_name,
+        validate_profile,
+    )
+    .await
+}
+
+async fn read_installer_state<V>(
+    installer_artifact: &InstallerArtifact,
+    instance_root: &Path,
+    libraries_root: &Path,
+    family_name: &str,
+    validate_profile: V,
+) -> Result<InstallerPersistedState>
+where
+    V: Fn(&ForgeInstallerProfile) -> Result<()>,
+{
     let archive = InstallerArchive::new(installer_artifact.path.clone());
     let state_paths = InstallerStatePaths::new(instance_root, family_name);
     let install_profile = archive
         .read_json::<ForgeInstallerProfile>(INSTALL_PROFILE_ENTRY)
-        .with_context(|| {
-            format!("read {family_name} {INSTALL_PROFILE_ENTRY} from installer failed")
+        .map_err(|source| Error::ReadInstallerProfile {
+            family_name: family_name.to_owned(),
+            source: Box::new(source),
         })?;
     validate_profile(&install_profile)?;
     let embedded_version = read_embedded_version(&archive, &install_profile, family_name)?;
@@ -311,7 +327,10 @@ where
         .await?;
     archive
         .extract_maven_artifacts(libraries_root)
-        .with_context(|| format!("extract {family_name} embedded maven artifacts failed"))?;
+        .map_err(|source| Error::ExtractInstallerMavenArtifacts {
+            family_name: family_name.to_owned(),
+            source: Box::new(source),
+        })?;
 
     Ok(InstallerPersistedState {
         install_profile,
@@ -319,9 +338,9 @@ where
     })
 }
 
-pub async fn prepare_installer_launch_version<RR, L, VL, F, M>(
+pub async fn persist_installer_launch_version<RR, L, VL, F, M>(
     request: InstallerLaunchVersionRequest<'_, RR, L, VL, F, M>,
-) -> Result<PreparedVersionJsonInstance<RR, L, VL>>
+) -> Result<ResolvedVersionJsonInstance<RR, L, VL>>
 where
     RR: VersionJsonRemoteResolver + Clone,
     L: VersionJsonRootLayout + Clone,
@@ -329,10 +348,12 @@ where
     F: Fn(Vec<PistonMetaLibraries>) -> Result<Vec<PistonMetaLibraries>>,
     M: Fn(Vec<PistonMetaLibraries>, Vec<PistonMetaLibraries>) -> Vec<PistonMetaLibraries>,
 {
-    let embedded_version = request.embedded_version.context(format!(
-        "{} installer is missing an embedded version json; launchable {} preparation is not available",
-        request.family_name, request.family_name
-    ))?;
+    let embedded_version =
+        request
+            .embedded_version
+            .ok_or_else(|| Error::InstallerEmbeddedVersionMissing {
+                family_name: request.family_name.to_owned(),
+            })?;
     let base_metadata =
         resolve_vanilla_metadata(request.vanilla_source, request.game_version.as_str()).await?;
     let merged_metadata = merge_embedded_version(
@@ -342,15 +363,13 @@ where
         request.merge_libraries,
         request.family_name,
     )?;
-    let launch_version = ResolvedVersionJsonMetadata::new(
+    ResolvedVersionJsonMetadata::new(
         request.remote_resolver.clone(),
         merged_metadata,
         base_metadata.asset_index_objects,
     )
     .persist(request.instance)
-    .await?;
-
-    launch_version.prepare(request.downloader).await
+    .await
 }
 
 pub struct InstallerLaunchVersionRequest<'a, RR, L, VL, F, M>
@@ -364,7 +383,6 @@ where
     pub instance: &'a Storage<VL, Storage<L>>,
     pub game_version: &'a MinecraftVersionId,
     pub remote_resolver: &'a RR,
-    pub downloader: &'a ElementalDownloader,
     pub vanilla_source: &'a VanillaSource,
     pub embedded_version: Option<&'a serde_json::Value>,
     pub normalize_libraries: F,
@@ -440,13 +458,13 @@ where
     VL: VersionJsonInstanceLayout,
 {
     let required_major_version = launch_version.required_java_major_version();
-    resolve_runtime(
+    Ok(resolve_runtime(
         required_major_version,
         runtime_executable_path,
         runtime_validation,
         operation_name,
     )
-    .await
+    .await?)
 }
 
 pub async fn installer_install_status<RR, L, VL>(
@@ -554,7 +572,10 @@ where
     M: Fn(Vec<PistonMetaLibraries>, Vec<PistonMetaLibraries>) -> Vec<PistonMetaLibraries>,
 {
     let mut embedded = serde_json::from_value::<EmbeddedVersionData>(embedded_version.clone())
-        .with_context(|| format!("decode {family_name} embedded version json failed"))?;
+        .map_err(|source| Error::DecodeEmbeddedVersion {
+            family_name: family_name.to_owned(),
+            source,
+        })?;
     embedded.libraries = normalize_libraries(embedded.libraries)?;
     let (arguments, minecraft_arguments) = merge_embedded_arguments(
         base_metadata.arguments.clone(),

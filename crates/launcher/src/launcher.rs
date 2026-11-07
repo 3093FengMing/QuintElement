@@ -4,7 +4,6 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Result, anyhow, bail};
 use elemental_core::{
     auth::authorizer::Authorizer, launcher::process, minecraft::MinecraftVersionId,
     storage::Storage,
@@ -13,7 +12,8 @@ use elemental_driver::{
     catalog::Catalog,
     descriptors::{
         BABRIC_DRIVER, CLEANROOM_DRIVER, FABRIC_DRIVER, FORGE_DRIVER, LEGACY_FABRIC_DRIVER,
-        LITELOADER_DRIVER, NEOFORGE_DRIVER, QUILT_DRIVER, RIFT_DRIVER, VANILLA_DRIVER,
+        LITELOADER_DRIVER, NEOFORGE_DRIVER, OUTLANDS_DRIVER, QUILT_DRIVER, RIFT_DRIVER,
+        VANILLA_DRIVER,
     },
     driver::{Driver, DriverDescriptor},
     drivers::{
@@ -22,6 +22,7 @@ use elemental_driver::{
         forge::prepared::ForgeFamily,
         liteloader::driver::LiteLoaderDriverFamily,
         neoforge::prepared::NeoForgeFamily,
+        outlands::driver::OutlandsDriverSpec,
         quilt::driver::QuiltDriverFamily,
         rift::driver::RiftDriverFamily,
         vanilla::{driver::VanillaDriver, source::VanillaSource},
@@ -36,10 +37,11 @@ use elemental_driver::{
     },
     inspect::InstalledInstance,
 };
-use elemental_infra::downloader::core::ElementalDownloader;
+use elemental_infra::downloader::{DownloadSession, ElementalDownloader};
 
 use crate::{
     builder::LauncherBuilder,
+    error::{Error, Result},
     request::{LaunchOptions, PrepareInstanceRequest},
     result::{
         Instance, LaunchCommandResult, LaunchedInstance, PreparedInstance, PreparedInstanceKind,
@@ -60,6 +62,7 @@ struct InspectDrivers {
     rift: ProfiledVersionJsonDriver<RiftDriverFamily>,
     forge: InstallerFamilyDriver<ForgeFamily>,
     cleanroom: InstallerFamilyDriver<CleanroomDriverSpec>,
+    outlands: InstallerFamilyDriver<OutlandsDriverSpec>,
     neoforge: InstallerFamilyDriver<NeoForgeFamily>,
 }
 
@@ -71,6 +74,7 @@ enum ResolvedLauncherDriver {
     Rift(ProfiledVersionJsonDriver<RiftDriverFamily>),
     Forge(InstallerFamilyDriver<ForgeFamily>),
     Cleanroom(InstallerFamilyDriver<CleanroomDriverSpec>),
+    Outlands(InstallerFamilyDriver<OutlandsDriverSpec>),
     NeoForge(InstallerFamilyDriver<NeoForgeFamily>),
 }
 
@@ -150,18 +154,19 @@ where
         &self,
         catalog: C,
     ) -> Result<HashMap<MinecraftVersionId, Vec<R>>> {
-        catalog.releases().await
+        Ok(catalog.releases().await?)
     }
 
     pub async fn prepare_instance(
         &self,
+        session: &DownloadSession,
         request: PrepareInstanceRequest,
     ) -> Result<PreparedInstance<L, VL>> {
         let instance = self.ensure_instance(request.instance_name).await?;
         let driver_spec = request.driver;
         let prepared_kind = self
             .resolve_driver(driver_spec.descriptor())?
-            .prepare(&instance, &driver_spec)
+            .prepare(session, &instance, &driver_spec)
             .await?;
         Ok(PreparedInstance::new(
             driver_spec.descriptor(),
@@ -221,29 +226,29 @@ where
         &self,
         instance_name: String,
     ) -> Result<LauncherInstanceStorage<L, VL>> {
-        self.game_storage()
+        Ok(self
+            .game_storage()
             .ensure_instance(instance_name, self.instance_layout.clone())
-            .await
+            .await?)
     }
 
     fn instance(&self, instance_name: String) -> Result<LauncherInstanceStorage<L, VL>> {
-        self.game_storage()
-            .instance(instance_name, self.instance_layout.clone())
+        Ok(self
+            .game_storage()
+            .instance(instance_name, self.instance_layout.clone())?)
     }
 
     fn vanilla_driver(&self) -> VanillaDriver {
-        VanillaDriver::new(VanillaSource::default(), self.downloader.clone())
+        VanillaDriver::new(VanillaSource::default())
     }
 
     fn profiled_driver<F>(&self, family: F) -> Result<ProfiledVersionJsonDriver<F>>
     where
         F: ProfiledVersionJsonFamily,
     {
-        Ok(family.clone().build_driver(
-            family.default_source()?,
-            VanillaSource::default(),
-            self.downloader.clone(),
-        ))
+        Ok(family
+            .clone()
+            .build_driver(family.default_source()?, VanillaSource::default()))
     }
 
     fn installer_driver<F>(&self) -> InstallerFamilyDriver<F>
@@ -251,11 +256,7 @@ where
         F: InstallerFamilyDriverSpec,
         F::Source: Default,
     {
-        InstallerFamilyDriver::new(
-            F::Source::default(),
-            VanillaSource::default(),
-            self.downloader.clone(),
-        )
+        InstallerFamilyDriver::new(F::Source::default(), VanillaSource::default())
     }
 
     fn resolve_driver(&self, desc: DriverDescriptor) -> Result<ResolvedLauncherDriver> {
@@ -277,8 +278,13 @@ where
             RIFT_DRIVER => ResolvedLauncherDriver::Rift(self.profiled_driver(RiftDriverFamily)?),
             FORGE_DRIVER => ResolvedLauncherDriver::Forge(self.installer_driver()),
             CLEANROOM_DRIVER => ResolvedLauncherDriver::Cleanroom(self.installer_driver()),
+            OUTLANDS_DRIVER => ResolvedLauncherDriver::Outlands(self.installer_driver()),
             NEOFORGE_DRIVER => ResolvedLauncherDriver::NeoForge(self.installer_driver()),
-            _ => bail!("unsupported driver '{}'", desc.id),
+            _ => {
+                return Err(Error::UnsupportedDriver {
+                    id: desc.id.to_owned(),
+                });
+            }
         })
     }
 }
@@ -286,6 +292,7 @@ where
 impl ResolvedLauncherDriver {
     async fn prepare<L, VL>(
         &self,
+        session: &DownloadSession,
         instance: &LauncherInstanceStorage<L, VL>,
         spec: &DriverSpec,
     ) -> Result<PreparedInstanceKind<L, VL>>
@@ -296,7 +303,7 @@ impl ResolvedLauncherDriver {
         match (self, spec) {
             (Self::Vanilla(driver), DriverSpec::Vanilla(vanilla_spec)) => {
                 let prepared = driver
-                    .prepare(instance, vanilla_spec.game_version.clone())
+                    .prepare(session, instance, vanilla_spec.game_version.clone())
                     .await?;
                 Ok(PreparedInstanceKind::Vanilla(prepared))
             }
@@ -305,6 +312,7 @@ impl ResolvedLauncherDriver {
             | (Self::FabricLike(driver), DriverSpec::Babric(loader_spec)) => {
                 let prepared = driver
                     .prepare(
+                        session,
                         instance,
                         loader_spec.game_version.clone(),
                         loader_spec.loader_version.clone(),
@@ -315,6 +323,7 @@ impl ResolvedLauncherDriver {
             (Self::Quilt(driver), DriverSpec::Quilt(loader_spec)) => {
                 let prepared = driver
                     .prepare(
+                        session,
                         instance,
                         loader_spec.game_version.clone(),
                         loader_spec.loader_version.clone(),
@@ -325,6 +334,7 @@ impl ResolvedLauncherDriver {
             (Self::LiteLoader(driver), DriverSpec::LiteLoader(loader_spec)) => {
                 let prepared = driver
                     .prepare(
+                        session,
                         instance,
                         loader_spec.game_version.clone(),
                         loader_spec.loader_version.clone(),
@@ -335,6 +345,7 @@ impl ResolvedLauncherDriver {
             (Self::Rift(driver), DriverSpec::Rift(loader_spec)) => {
                 let prepared = driver
                     .prepare(
+                        session,
                         instance,
                         loader_spec.game_version.clone(),
                         loader_spec.loader_version.clone(),
@@ -345,6 +356,7 @@ impl ResolvedLauncherDriver {
             (Self::Forge(driver), DriverSpec::Forge(loader_spec)) => {
                 let prepared = driver
                     .prepare(
+                        session,
                         instance,
                         loader_spec.game_version.clone(),
                         loader_spec.loader_version.clone(),
@@ -355,6 +367,7 @@ impl ResolvedLauncherDriver {
             (Self::Cleanroom(driver), DriverSpec::Cleanroom(loader_spec)) => {
                 let prepared = driver
                     .prepare(
+                        session,
                         instance,
                         loader_spec.game_version.clone(),
                         loader_spec.loader_version.clone(),
@@ -362,9 +375,21 @@ impl ResolvedLauncherDriver {
                     .await?;
                 Ok(PreparedInstanceKind::Cleanroom(prepared))
             }
+            (Self::Outlands(driver), DriverSpec::Outlands(loader_spec)) => {
+                let prepared = driver
+                    .prepare(
+                        session,
+                        instance,
+                        loader_spec.game_version.clone(),
+                        loader_spec.loader_version.clone(),
+                    )
+                    .await?;
+                Ok(PreparedInstanceKind::Outlands(prepared))
+            }
             (Self::NeoForge(driver), DriverSpec::NeoForge(loader_spec)) => {
                 let prepared = driver
                     .prepare(
+                        session,
                         instance,
                         loader_spec.game_version.clone(),
                         loader_spec.loader_version.clone(),
@@ -372,10 +397,9 @@ impl ResolvedLauncherDriver {
                     .await?;
                 Ok(PreparedInstanceKind::NeoForge(prepared))
             }
-            _ => bail!(
-                "resolved launcher driver does not support '{}' prepare flow",
-                spec.id()
-            ),
+            _ => Err(Error::UnsupportedDriverFlow {
+                id: spec.id().to_owned(),
+            }),
         }
     }
 
@@ -407,6 +431,9 @@ impl ResolvedLauncherDriver {
                 driver.load_prepared(instance).await?,
             )),
             Self::Cleanroom(driver) => Ok(PreparedInstanceKind::Cleanroom(
+                driver.load_prepared(instance).await?,
+            )),
+            Self::Outlands(driver) => Ok(PreparedInstanceKind::Outlands(
                 driver.load_prepared(instance).await?,
             )),
             Self::NeoForge(driver) => Ok(PreparedInstanceKind::NeoForge(
@@ -490,6 +517,15 @@ impl ResolvedLauncherDriver {
                     .await?;
                 Ok(LaunchCommandResult { runtime, command })
             }
+            Self::Outlands(driver) => {
+                let PreparedInstanceKind::Outlands(version) = &prepared.inner else {
+                    return Err(prepared_variant_mismatch(prepared));
+                };
+                let (runtime, command) = driver
+                    .build_launch_command(authorizer, version, launch_options)
+                    .await?;
+                Ok(LaunchCommandResult { runtime, command })
+            }
             Self::NeoForge(driver) => {
                 let PreparedInstanceKind::NeoForge(version) = &prepared.inner else {
                     return Err(prepared_variant_mismatch(prepared));
@@ -503,15 +539,14 @@ impl ResolvedLauncherDriver {
     }
 }
 
-fn prepared_variant_mismatch<L, VL>(prepared: &PreparedInstance<L, VL>) -> anyhow::Error
+fn prepared_variant_mismatch<L, VL>(prepared: &PreparedInstance<L, VL>) -> Error
 where
     L: VersionJsonRootLayout,
     VL: VersionJsonInstanceLayout,
 {
-    anyhow!(
-        "prepared instance variant does not match driver '{}'",
-        prepared.driver.id
-    )
+    Error::PreparedVariantMismatch {
+        driver: prepared.driver.id.to_owned(),
+    }
 }
 
 impl InspectDrivers {
@@ -531,11 +566,12 @@ impl InspectDrivers {
             rift: launcher.profiled_driver(RiftDriverFamily)?,
             forge: launcher.installer_driver::<ForgeFamily>(),
             cleanroom: launcher.installer_driver::<CleanroomDriverSpec>(),
+            outlands: launcher.installer_driver::<OutlandsDriverSpec>(),
             neoforge: launcher.installer_driver::<NeoForgeFamily>(),
         })
     }
 
-    fn as_array<L, VL>(&self) -> [&dyn Driver<L, VL>; 10]
+    fn as_array<L, VL>(&self) -> [&dyn Driver<L, VL>; 11]
     where
         L: elemental_core::storage::layout::Layout,
         VL: elemental_core::storage::layout::Layout,
@@ -549,6 +585,7 @@ impl InspectDrivers {
             &self.rift,
             &self.forge,
             &self.cleanroom,
+            &self.outlands,
             &self.neoforge,
             // Every instance could be a vanilla instance, so the vanilla driver should be last to allow other drivers to take precedence when applicable
             &self.vanilla,

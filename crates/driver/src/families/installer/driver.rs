@@ -1,6 +1,6 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::marker::PhantomData;
 
-use anyhow::Result;
+use crate::error::Result;
 use async_trait::async_trait;
 use elemental_core::{
     auth::authorizer::Authorizer,
@@ -9,7 +9,7 @@ use elemental_core::{
     runtime::distribution::Distribution,
     storage::{Storage, layout::Layout},
 };
-use elemental_infra::downloader::core::ElementalDownloader;
+use elemental_infra::downloader::DownloadSession;
 use elemental_schema::mojang::piston::PistonMetaData;
 
 use crate::{
@@ -25,16 +25,16 @@ use crate::{
             build_version_json_launch_command, launch_wrapped_version,
         },
     },
-    inspect::{InstanceProbe, LibraryPrefixSet},
+    inspect::{InstanceProbe, ProfiledDriverIdentity},
     loader_version::LoaderVersionId,
 };
 
 pub trait InstallerFamilyDriverSpec: InstallerFamily {
-    const DRIVER: DriverDescriptor;
-    const INSPECT_PREFIXES: &'static [&'static str];
+    const IDENTITY: ProfiledDriverIdentity;
 
+    /// Inspects installed metadata, allowing family-specific legacy identity handling.
     fn inspect_installed(metadata: &PistonMetaData) -> Option<InstalledDriver> {
-        LibraryPrefixSet::new(Self::INSPECT_PREFIXES).installed_driver(metadata, Self::DRIVER)
+        Self::IDENTITY.inspect_installed(metadata)
     }
 }
 
@@ -45,7 +45,6 @@ where
 {
     source: F::Source,
     vanilla_source: VanillaSource,
-    downloader: Arc<ElementalDownloader>,
     family: PhantomData<F>,
 }
 
@@ -64,21 +63,17 @@ impl<F> InstallerFamilyDriver<F>
 where
     F: InstallerFamilyDriverSpec,
 {
-    pub fn new(
-        source: F::Source,
-        vanilla_source: VanillaSource,
-        downloader: Arc<ElementalDownloader>,
-    ) -> Self {
+    pub fn new(source: F::Source, vanilla_source: VanillaSource) -> Self {
         Self {
             source,
             vanilla_source,
-            downloader,
             family: PhantomData,
         }
     }
 
     pub async fn prepare<L, VL>(
         &self,
+        session: &DownloadSession,
         instance: &Storage<VL, Storage<L>>,
         game_version: MinecraftVersionId,
         loader_version: LoaderVersionId,
@@ -88,6 +83,7 @@ where
         VL: VersionJsonInstanceLayout + Clone,
     {
         self.prepare_with_config(
+            session,
             instance,
             game_version,
             loader_version,
@@ -98,6 +94,7 @@ where
 
     pub async fn prepare_with_config<L, VL>(
         &self,
+        session: &DownloadSession,
         instance: &Storage<VL, Storage<L>>,
         game_version: MinecraftVersionId,
         loader_version: LoaderVersionId,
@@ -114,7 +111,7 @@ where
             loader_version,
         )?
         .prepare(
-            self.downloader.as_ref(),
+            session,
             &self.vanilla_source,
             &self.remote_resolver(),
             config.runtime_executable_path.as_deref(),
@@ -193,11 +190,7 @@ where
     F::Source: Default,
 {
     pub fn with_defaults() -> Result<Self> {
-        Ok(Self::new(
-            F::Source::default(),
-            VanillaSource::default(),
-            ElementalDownloader::new(),
-        ))
+        Ok(Self::new(F::Source::default(), VanillaSource::default()))
     }
 }
 
@@ -210,7 +203,7 @@ where
     VL: Layout,
 {
     fn descriptor(&self) -> DriverDescriptor {
-        F::DRIVER
+        F::IDENTITY.descriptor()
     }
 
     async fn inspect(&self, probe: &InstanceProbe<L, VL>) -> Result<Option<InstalledDriver>> {

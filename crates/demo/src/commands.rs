@@ -48,11 +48,25 @@ async fn run_launch(config: DemoConfig) -> Result<()> {
         )
         .await?
     } else {
-        time_operation(launcher.prepare_instance(PrepareInstanceRequest {
-            instance_name: request_instance_name,
-            driver: request_driver,
-        }))
-        .await?
+        let session = launcher
+            .downloader()
+            .session(format!("prepare {request_instance_name}"))
+            .open()
+            .await?;
+        let started_at = std::time::Instant::now();
+        let result = launcher
+            .prepare_instance(
+                &session,
+                PrepareInstanceRequest {
+                    instance_name: request_instance_name,
+                    driver: request_driver,
+                },
+            )
+            .await;
+        let report = session.finish().await?;
+        let prepared = result?;
+        report.success()?;
+        (prepared, started_at.elapsed())
     };
 
     let command_result = launcher
@@ -127,6 +141,10 @@ fn to_driver_spec(config: &DemoConfig) -> Result<DriverSpec> {
             game_version,
             loader_version: require_loader_version(config, "cleanroom")?,
         }),
+        DemoDriver::Outlands => DriverSpec::Outlands(LoaderSpec {
+            game_version,
+            loader_version: require_loader_version(config, "outlands")?,
+        }),
         DemoDriver::NeoForge => DriverSpec::NeoForge(LoaderSpec {
             game_version,
             loader_version: require_loader_version(config, "neoforge")?,
@@ -158,12 +176,13 @@ pub(super) fn offline_authorizer() -> OfflineAuthorizer {
     }
 }
 
-pub(super) async fn time_operation<T, Fut>(operation: Fut) -> Result<(T, Duration)>
+pub(super) async fn time_operation<T, E, Fut>(operation: Fut) -> Result<(T, Duration)>
 where
-    Fut: Future<Output = Result<T>>,
+    Fut: Future<Output = std::result::Result<T, E>>,
+    E: Into<anyhow::Error>,
 {
     let started_at = std::time::Instant::now();
-    let result = operation.await?;
+    let result = operation.await.map_err(Into::into)?;
     Ok((result, started_at.elapsed()))
 }
 

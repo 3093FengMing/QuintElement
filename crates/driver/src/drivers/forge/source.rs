@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use elemental_core::minecraft::MinecraftVersionId;
 
 use crate::{
@@ -125,6 +125,9 @@ pub fn forge_installer_relative_path(version: &str) -> PathBuf {
         .join(format!("forge-{version}-installer.jar"))
 }
 
+/// Parses a Forge installer coordinate or display version into game and loader versions.
+///
+/// Returns an invalid-notation error when the game/loader separator is absent.
 pub fn parse_installer_version(version: &str) -> Result<(String, String)> {
     version
         .split_once('-')
@@ -134,5 +137,8 @@ pub fn parse_installer_version(version: &str) -> Result<(String, String)> {
                 .unwrap_or(loader_version);
             (game_version.to_owned(), loader_version.to_owned())
         })
-        .context(format!("forge installer version is invalid: {version}"))
+        .ok_or_else(|| Error::InvalidNotation {
+            label: "forge installer version".to_owned(),
+            notation: version.to_owned(),
+        })
 }

@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
 use elemental_core::storage::{Storage, layout::Layoutable};
-use elemental_infra::downloader::task::DownloadTask;
+use elemental_infra::downloader::DownloadTask;
 
 use crate::{
+    error::{Error, Result},
     families::version_json::{VersionJsonRootLayout, VersionJsonRootResource},
     maven::artifact_path,
 };
@@ -20,12 +20,14 @@ pub struct InstallerArtifact {
 
 impl InstallerArtifact {
     pub fn download_task(&self) -> DownloadTask {
-        DownloadTask::new(
-            self.url.clone(),
-            self.path.clone(),
-            self.expected_size,
-            self.sha1.clone(),
-        )
+        let mut task = DownloadTask::new(self.url.clone(), self.path.clone());
+        if let Some(expected_size) = self.expected_size {
+            task = task.size(expected_size);
+        }
+        if let Some(sha1) = &self.sha1 {
+            task = task.sha1(sha1.clone());
+        }
+        task
     }
 }
 
@@ -42,7 +44,9 @@ pub fn installer_coordinate_file_name(notation: &str) -> Result<String> {
         .file_name()
         .and_then(|name| name.to_str())
         .map(ToOwned::to_owned)
-        .ok_or_else(|| anyhow!("installer coordinate has no file name: {notation}"))?;
+        .ok_or_else(|| Error::InstallerCoordinateFileNameMissing {
+            notation: notation.to_owned(),
+        })?;
     Ok(file_name)
 }
 
