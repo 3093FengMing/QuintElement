@@ -15,6 +15,9 @@ pub enum Error {
     #[error(transparent)]
     Http(#[from] reqwest::Error),
 
+    #[error("{message}")]
+    HttpClientBuild { message: String },
+
     #[error(transparent)]
     Regex(#[from] regex::Error),
 
@@ -86,8 +89,26 @@ pub enum Error {
         source: reqwest::Error,
     },
 
+    #[error("{source_name} resource exceeds the {limit} byte limit: {url}")]
+    ResourceTooLarge {
+        source_name: String,
+        url: String,
+        limit: usize,
+    },
+
+    #[error("{source_name} resource request timed out: {url}")]
+    ResourceTimeout {
+        source_name: String,
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
     #[error("invalid {label} notation: {notation}")]
     InvalidNotation { label: String, notation: String },
+
+    #[error("{context} must use http or https: {url}")]
+    UnsupportedUrlScheme { context: String, url: String },
 
     #[error("decode {source_label} maven metadata failed: {url}")]
     DecodeMavenMetadata {
