@@ -4,11 +4,11 @@ use std::{
 };
 
 use elemental_core::{
-    auth::authorizer::Authorizer, launcher::process, minecraft::MinecraftVersionId,
+    auth::credential::UserCredential,
+    launcher::{command::LaunchCommand, process},
     storage::Storage,
 };
 use elemental_driver::{
-    catalog::{GameVersion, GameVersionCatalog, LoaderRelease, LoaderVersionCatalog},
     descriptors::{
         BABRIC_DRIVER, CLEANROOM_DRIVER, FABRIC_DRIVER, FORGE_DRIVER, LEGACY_FABRIC_DRIVER,
         LITELOADER_DRIVER, NEOFORGE_DRIVER, OUTLANDS_DRIVER, QUILT_DRIVER, RIFT_DRIVER,
@@ -25,15 +25,14 @@ use elemental_driver::{
         outlands::OutlandsDriverSpec,
         quilt::driver::QuiltDriverFamily,
         rift::driver::RiftDriverFamily,
-        vanilla::{driver::VanillaDriver, source::VanillaSource},
+        vanilla::driver::VanillaDriver,
     },
     families::{
-        installer::{InstallerFamily, InstallerFamilyDriver},
+        installer::InstallerFamilyDriver,
         version_json::{
             BaseInstanceLayout, BaseRootLayout, ProfiledVersionJsonDriver,
-            ProfiledVersionJsonFamily, ProfiledVersionJsonFamilyExt, VersionJsonGameStorageExt,
-            VersionJsonInstanceLayout, VersionJsonRootLayout, build_version_json_launch_command,
-            inspect_instances,
+            ProfiledVersionJsonFamilyExt, VersionJsonGameStorageExt, VersionJsonInstanceLayout,
+            VersionJsonRootLayout, build_version_json_launch_command, inspect_instances,
         },
     },
     inspect::InstalledInstance,
@@ -44,9 +43,11 @@ use elemental_infra::downloader::{DownloadSession, ElementalDownloader};
 use crate::{
     builder::LauncherBuilder,
     error::{Error, Result},
-    request::{LaunchOptions, PrepareInstanceRequest},
+    origin::{DriverOrigins, InstallerFamilySource, ProfiledFamilySource},
+    preparation::InstancePreparation,
+    request::LaunchOptions,
     result::{
-        Instance, LaunchCommandResult, LaunchedInstance, PreparedInstance, PreparedInstanceKind,
+        Instance, LaunchedInstance, LoggedLaunchedInstance, PreparedInstance, PreparedInstanceKind,
     },
     spec::{DriverFlow, DriverSpec},
 };
@@ -70,6 +71,7 @@ where
     downloader: Arc<ElementalDownloader>,
     root_layout: L,
     instance_layout: VL,
+    origins: DriverOrigins,
 }
 
 impl Launcher<BaseRootLayout, BaseInstanceLayout> {
@@ -93,11 +95,28 @@ where
         root_layout: L,
         instance_layout: VL,
     ) -> Self {
+        Self::with_layouts_and_origins(
+            storage_root,
+            downloader,
+            root_layout,
+            instance_layout,
+            DriverOrigins::default(),
+        )
+    }
+
+    pub fn with_layouts_and_origins(
+        storage_root: PathBuf,
+        downloader: Arc<ElementalDownloader>,
+        root_layout: L,
+        instance_layout: VL,
+        origins: DriverOrigins,
+    ) -> Self {
         Self {
             storage_root,
             downloader,
             root_layout,
             instance_layout,
+            origins,
         }
     }
 
@@ -132,36 +151,72 @@ where
             .map(summarize_installed_instance))
     }
 
-    pub async fn game_versions<C: GameVersionCatalog>(
+    /// Install or refresh an instance with a default download session.
+    pub async fn prepare(
         &self,
-        catalog: C,
-    ) -> Result<Vec<GameVersion>> {
-        Ok(catalog.game_versions().await?)
+        instance_name: String,
+        driver: DriverSpec,
+    ) -> Result<PreparedInstance<L, VL>> {
+        self.begin_prepare(instance_name, driver)
+            .await?
+            .prepare()
+            .await
     }
 
-    pub async fn loader_versions<C: LoaderVersionCatalog>(
+    /// Start a preparation with a default session while exposing its progress.
+    ///
+    /// Calling [`InstancePreparation::prepare`] keeps session ownership inside
+    /// the launcher. Dropping the preparation without calling `prepare` cancels
+    /// the download session.
+    pub async fn begin_prepare(
         &self,
-        catalog: C,
-        game_version: &MinecraftVersionId,
-    ) -> Result<Vec<LoaderRelease>> {
-        Ok(catalog.loader_versions(game_version).await?)
+        instance_name: String,
+        driver: DriverSpec,
+    ) -> Result<InstancePreparation<'_, L, VL>> {
+        let session = self
+            .downloader
+            .session(format!("prepare {instance_name}"))
+            .open()
+            .await?;
+        Ok(InstancePreparation::new(
+            self,
+            session,
+            instance_name,
+            driver,
+        ))
     }
 
-    pub async fn prepare_instance(
+    /// Install or refresh an instance with a caller-configured session.
+    ///
+    /// The launcher finishes and validates the session. Use
+    /// [`Launcher::prepare_in_session`] when the caller needs to own the
+    /// session lifecycle or inspect the download report.
+    pub async fn prepare_with_session(
+        &self,
+        session: DownloadSession,
+        instance_name: String,
+        driver: DriverSpec,
+    ) -> Result<PreparedInstance<L, VL>> {
+        InstancePreparation::new(self, session, instance_name, driver)
+            .prepare()
+            .await
+    }
+
+    /// Low-level preparation inside a caller-owned session.
+    ///
+    /// The caller must finish or cancel `session` and validate its report.
+    pub async fn prepare_in_session(
         &self,
         session: &DownloadSession,
-        request: PrepareInstanceRequest,
+        instance_name: String,
+        driver: DriverSpec,
     ) -> Result<PreparedInstance<L, VL>> {
-        let instance = self.ensure_instance(request.instance_name).await?;
-        let driver_spec = request.driver;
+        let instance = self.ensure_instance(instance_name).await?;
         let prepared_kind = self
-            .resolve_driver(driver_spec.descriptor())?
-            .prepare(session, &instance, &driver_spec)
+            .resolve_driver(driver.descriptor())?
+            .prepare(session, &instance, &driver)
             .await?;
-        Ok(PreparedInstance::new(
-            driver_spec.descriptor(),
-            prepared_kind,
-        ))
+        Ok(PreparedInstance::new(driver.descriptor(), prepared_kind))
     }
 
     pub async fn load_instance(&self, instance: Instance) -> Result<PreparedInstance<L, VL>> {
@@ -174,45 +229,68 @@ where
         Ok(PreparedInstance::new(driver_spec, prepared_kind))
     }
 
-    pub async fn build_launch_command<A>(
+    pub async fn build_launch_command(
         &self,
         prepared: &PreparedInstance<L, VL>,
-        authorizer: A,
+        credential: &UserCredential,
         options: &LaunchOptions,
-    ) -> Result<LaunchCommandResult>
-    where
-        A: Authorizer,
-    {
-        let (runtime, command) = match &prepared.inner {
+    ) -> Result<LaunchCommand> {
+        match &prepared.inner {
             PreparedInstanceKind::VersionJson(version) => {
-                build_version_json_launch_command(authorizer, version, options).await?
+                Ok(build_version_json_launch_command(credential, version, options).await?)
             }
             PreparedInstanceKind::Installer(version) => {
-                build_version_json_launch_command(authorizer, &version.launch_version, options)
-                    .await?
+                Ok(
+                    build_version_json_launch_command(credential, &version.launch_version, options)
+                        .await?,
+                )
             }
-        };
-        Ok(LaunchCommandResult { runtime, command })
+        }
     }
 
-    pub async fn launch_prepared_instance<A>(
+    pub fn launch(&self, command: LaunchCommand) -> Result<LaunchedInstance> {
+        let runtime = command.runtime.clone();
+        let child = process::spawn_command(command)?;
+        Ok(LaunchedInstance { runtime, child })
+    }
+
+    pub fn launch_logged(&self, command: LaunchCommand) -> Result<LoggedLaunchedInstance> {
+        let runtime = command.runtime.clone();
+        let logged = process::spawn_command_logged(command)?;
+        Ok(LoggedLaunchedInstance {
+            runtime,
+            child: logged.child,
+            lines: logged.lines,
+        })
+    }
+
+    pub async fn launch_prepared_instance(
         &self,
         prepared: &PreparedInstance<L, VL>,
-        authorizer: A,
+        credential: &UserCredential,
         options: &LaunchOptions,
-    ) -> Result<LaunchedInstance>
-    where
-        A: Authorizer,
-    {
+    ) -> Result<LaunchedInstance> {
         let command = self
-            .build_launch_command(prepared, authorizer, options)
+            .build_launch_command(prepared, credential, options)
             .await?;
-        let child = process::spawn_command(command.command.clone())?;
+        self.launch(command)
+    }
 
-        Ok(LaunchedInstance {
-            runtime: command.runtime,
-            child,
-        })
+    pub async fn launch_instance(
+        &self,
+        instance_name: String,
+        credential: &UserCredential,
+        options: &LaunchOptions,
+    ) -> Result<LaunchedInstance> {
+        let instance =
+            self.inspect_instance(instance_name.clone())
+                .await?
+                .ok_or(Error::InstanceNotFound {
+                    name: instance_name,
+                })?;
+        let prepared = self.load_instance(instance).await?;
+        self.launch_prepared_instance(&prepared, credential, options)
+            .await
     }
 
     fn game_storage(&self) -> LauncherGameStorage<L> {
@@ -236,23 +314,25 @@ where
     }
 
     fn vanilla_driver(&self) -> VanillaDriver {
-        VanillaDriver::new(VanillaSource::default())
+        VanillaDriver::new(self.origins.vanilla_source())
     }
 
     fn profiled_driver<F>(&self, family: F) -> Result<ProfiledVersionJsonDriver<F>>
     where
-        F: ProfiledVersionJsonFamily,
-        F::Source: Default,
+        F: ProfiledFamilySource,
     {
-        Ok(family.clone().build_driver(family.default_source()?))
+        Ok(family
+            .clone()
+            .build_driver(family.source_with_origins(&self.origins)?))
     }
 
-    fn installer_driver<F>(&self) -> InstallerFamilyDriver<F>
+    fn installer_driver<F>(&self) -> Result<InstallerFamilyDriver<F>>
     where
-        F: InstallerFamily,
-        F::Source: Default,
+        F: InstallerFamilySource,
     {
-        InstallerFamilyDriver::new(F::Source::default())
+        Ok(InstallerFamilyDriver::new(F::source_with_origins(
+            &self.origins,
+        )?))
     }
 
     fn resolve_driver(&self, desc: DriverDescriptor) -> Result<ResolvedLauncherDriver> {
@@ -277,16 +357,16 @@ where
                 self.profiled_driver(RiftDriverFamily)?,
             )),
             FORGE_DRIVER => {
-                ResolvedLauncherDriver::Installer(InstallerDriver::Forge(self.installer_driver()))
+                ResolvedLauncherDriver::Installer(InstallerDriver::Forge(self.installer_driver()?))
             }
             CLEANROOM_DRIVER => ResolvedLauncherDriver::Installer(InstallerDriver::Cleanroom(
-                self.installer_driver(),
+                self.installer_driver()?,
             )),
             OUTLANDS_DRIVER => ResolvedLauncherDriver::Installer(InstallerDriver::Outlands(
-                self.installer_driver(),
+                self.installer_driver()?,
             )),
             NEOFORGE_DRIVER => ResolvedLauncherDriver::Installer(InstallerDriver::NeoForge(
-                self.installer_driver(),
+                self.installer_driver()?,
             )),
             _ => {
                 return Err(Error::UnsupportedDriver {
@@ -383,10 +463,10 @@ where
             Box::new(self.profiled_driver(QuiltDriverFamily)?),
             Box::new(self.profiled_driver(LiteLoaderDriverFamily)?),
             Box::new(self.profiled_driver(RiftDriverFamily)?),
-            Box::new(self.installer_driver::<ForgeFamily>()),
-            Box::new(self.installer_driver::<CleanroomDriverSpec>()),
-            Box::new(self.installer_driver::<OutlandsDriverSpec>()),
-            Box::new(self.installer_driver::<NeoForgeFamily>()),
+            Box::new(self.installer_driver::<ForgeFamily>()?),
+            Box::new(self.installer_driver::<CleanroomDriverSpec>()?),
+            Box::new(self.installer_driver::<OutlandsDriverSpec>()?),
+            Box::new(self.installer_driver::<NeoForgeFamily>()?),
             // Vanilla is last so more specific drivers take precedence.
             Box::new(self.vanilla_driver()),
         ])

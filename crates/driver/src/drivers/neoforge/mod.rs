@@ -1,4 +1,4 @@
-use elemental_core::minecraft::MinecraftVersionId;
+use elemental_core::minecraft::{MinecraftVersion, MinecraftVersionId};
 use elemental_schema::{forge::ForgeInstallerProfile, mojang::piston::PistonMetaData};
 
 use crate::{
@@ -242,28 +242,26 @@ fn infer_neoforge_game_version(loader_version: &str) -> Option<MinecraftVersionI
     };
 
     let major_number = major.parse::<u32>().ok()?;
+    let minor_number = minor.parse::<u32>().ok()?;
     if major_number >= 26 {
         let [_, _, hotfix, _build] = parts.as_slice() else {
             return None;
         };
-        let game_version = if *hotfix == "0" {
-            format!("{major}.{minor}")
-        } else {
-            format!("{major}.{minor}.{hotfix}")
-        };
-        return Some(MinecraftVersionId::from(game_version));
+        let patch_number = hotfix.parse::<u32>().ok()?;
+
+        return Some(
+            MinecraftVersion::year_release(major_number, minor_number, patch_number).into_id(),
+        );
     }
 
     if parts.len() != 3 {
         return None;
     }
     // Mojang uses "1.21", rather than "1.21.0", for the base release.
-    let game_version = if *minor == "0" {
-        format!("1.{major}")
-    } else {
-        format!("1.{major}.{minor}")
-    };
-    Some(MinecraftVersionId::from(game_version))
+    if minor_number == 0 {
+        return Some(MinecraftVersionId::from(format!("1.{major_number}")));
+    }
+    Some(MinecraftVersion::legacy_release(1, major_number, minor_number).into_id())
 }
 
 #[cfg(test)]

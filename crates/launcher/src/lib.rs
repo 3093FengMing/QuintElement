@@ -1,13 +1,21 @@
 mod builder;
+mod catalog;
 pub mod error;
 mod launcher;
+mod origin;
+mod preparation;
 mod request;
 mod result;
 mod spec;
 
 pub use builder::LauncherBuilder;
+pub use catalog::DriverCatalog;
+pub use elemental_core::auth::credential::UserCredential;
+pub use elemental_core::launcher::command::LaunchCommand;
 pub use elemental_infra::downloader::DownloadSession;
 pub use launcher::Launcher;
-pub use request::{LaunchOptions, PrepareInstanceRequest};
-pub use result::{Instance, LaunchCommandResult, LaunchedInstance, PreparedInstance};
+pub use origin::DriverOrigins;
+pub use preparation::InstancePreparation;
+pub use request::LaunchOptions;
+pub use result::{Instance, LaunchedInstance, LoggedLaunchedInstance, PreparedInstance};
 pub use spec::{DriverSpec, LoaderSpec, VanillaSpec};

@@ -3,10 +3,10 @@
 High-level instance lifecycle for prepared Minecraft installations.
 
 `elemental-launcher` coordinates catalogs, drivers, storage layouts, the
-downloader, runtime selection, authentication, and process launch. It supports
-the full range of Elemental drivers while keeping the caller-facing flow small:
-inspect an instance, prepare or reload it, then build a command or start the
-game.
+downloader, runtime selection, and process launch. Authentication is completed
+by the caller before launch. It supports the full range of Elemental drivers
+while keeping the caller-facing flow small: inspect an instance, prepare or
+reload it, build a mutable launch command, then start the game.
 
 ## Features
 
@@ -39,62 +39,137 @@ Prepare a Vanilla instance and build its launch command:
 
 ```rust
 use anyhow::Result;
-use elemental_core::auth::authorizers::offline::OfflineAuthorizer;
-use elemental_launcher::{
-    DriverSpec, LaunchOptions, Launcher, PrepareInstanceRequest, VanillaSpec,
-};
+use elemental_core::auth::{authorizer::Authorizer, authorizers::offline::OfflineAuthorizer};
+use elemental_launcher::{DriverSpec, LaunchOptions, Launcher};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let launcher = Launcher::builder()
         .storage_root(".minecraft")
         .build();
-    let session = launcher
-        .downloader()
-        .session("prepare Vanilla-1.20.1")
-        .open()
-        .await?;
 
     let prepared = launcher
-        .prepare_instance(
-            &session,
-            PrepareInstanceRequest {
-                instance_name: "Vanilla-1.20.1".to_owned(),
-                driver: DriverSpec::Vanilla(VanillaSpec {
-                    game_version: "1.20.1".into(),
-                }),
-            },
+        .prepare(
+            "Vanilla-1.20.1".to_owned(),
+            DriverSpec::vanilla("1.20.1".into()),
         )
         .await?;
-    let report = session.finish().await?;
-    report.success()?;
 
-    let command = launcher
+    let credential = OfflineAuthorizer {
+        username: "Player".to_owned(),
+    }
+    .authorize()
+    .await?;
+
+    let mut command = launcher
         .build_launch_command(
             &prepared,
-            OfflineAuthorizer {
-                username: "Player".to_owned(),
-            },
+            &credential,
             &LaunchOptions::default(),
         )
         .await?;
+    command.add_jvm_argument("-Xmx4G".to_owned());
 
     println!(
         "{} with {}",
         prepared.driver().id,
-        command.runtime.executable().display()
+        command.program().display()
     );
     Ok(())
 }
 ```
 
-`prepare_instance()` downloads and writes missing artifacts. To start the game,
-pass the prepared instance and command to `launch_prepared_instance()`, or use
-the returned `LaunchCommand` yourself.
+`prepare()` downloads and writes missing artifacts with a default download
+session. To start the game, pass the command to `launch()` or
+`launch_logged()`.
 
-The caller owns the download session. Choose its name and configure retry,
-failure, parallelism, and rate-limit settings before `open()`. Pass the opened
-session to `prepare_instance()`, then call `finish()` or `cancel()` yourself.
+Authentication is independent from launch. An `Authorizer` returns a
+`UserCredential`; `build_launch_command()` injects that credential into the
+game arguments and returns a mutable `LaunchCommand`. Authentication-specific
+JVM arguments can be appended after that without changing the credential type.
+
+### Observing preparation progress
+
+`begin_prepare()` keeps the session lifecycle inside the launcher while
+exposing the session to the host. The session state derives a structured
+progress view and publishes it on a watch channel:
+
+```rust
+let preparation = launcher
+    .begin_prepare(
+        "Vanilla-1.20.1".to_owned(),
+        DriverSpec::vanilla("1.20.1".into()),
+    )
+    .await?;
+let progress = preparation.session().progress_receiver();
+
+let prepared = preparation.prepare().await?;
+println!("{:?}", progress.borrow().active_tasks);
+```
+
+The view exposes active tasks, the last-seen group, and task and byte counters.
+Formatting task and group names is left to the UI.
+
+### Custom download sessions
+
+Use `prepare_with_session()` when the host needs custom retry or rate-limit
+settings but still wants the launcher to finish and validate the session:
+
+```rust
+let session = launcher
+    .downloader()
+    .session("prepare Vanilla-1.20.1")
+    .parallelism(8)
+    .open()
+    .await?;
+
+let prepared = launcher
+    .prepare_with_session(
+        session,
+        "Vanilla-1.20.1".to_owned(),
+        DriverSpec::vanilla("1.20.1".into()),
+    )
+    .await?;
+```
+
+Use `prepare_in_session()` when the caller also needs to own the session
+lifecycle, cancellation, or the download report:
+
+```rust
+let session = launcher
+    .downloader()
+    .session("prepare Vanilla-1.20.1")
+    .parallelism(8)
+    .open()
+    .await?;
+
+let prepared = launcher
+    .prepare_in_session(
+        &session,
+        "Vanilla-1.20.1".to_owned(),
+        DriverSpec::vanilla("1.20.1".into()),
+    )
+    .await?;
+
+let report = session.finish().await?;
+report.success()?;
+```
+
+The session exposes `progress_receiver()`, `subscribe()`, and `snapshot()` for
+UI progress reporting.
+
+### Auth-specific JVM arguments
+
+```rust
+let mut command = launcher
+    .build_launch_command(&prepared, &credential, &LaunchOptions::default())
+    .await?;
+command.add_jvm_argument(format!(
+    "-javaagent:{}",
+    authlib_injector.display()
+));
+let game = launcher.launch(command)?;
+```
 
 ## Instance Lifecycle
 
@@ -102,11 +177,19 @@ session to `prepare_instance()`, then call `finish()` or `cancel()` yourself.
 | --- | --- |
 | Discover local instances | `inspect_instances()` |
 | Detect one instance and its driver | `inspect_instance(name)` |
-| Install or refresh an instance | `prepare_instance(session, request)` |
+| Install or refresh an instance | `prepare(name, driver)` |
+| Prepare with an observed session | `begin_prepare(name, driver).prepare()` |
+| Install with a custom session and managed lifecycle | `prepare_with_session(session, name, driver)` |
+| Install with a custom session and caller-owned lifecycle | `prepare_in_session(&session, name, driver)` |
 | Reload an existing installation | `load_instance(instance)` |
 | Build a command without spawning | `build_launch_command(...)` |
-| Spawn the configured Java process | `launch_prepared_instance(...)` |
-| Run a catalog directly | `catalog(catalog)` |
+| Spawn a customized command | `launch(command)` / `launch_logged(command)` |
+| Build and spawn in one call | `launch_prepared_instance(...)` |
+| Launch an installed instance by name | `launch_instance(...)` |
+
+Catalogs are not wrapped by the launcher. Use
+`DriverCatalog::for_driver(driver)?.game_versions()` and
+`DriverCatalog::for_driver(driver)?.loader_versions(&game_version)` directly.
 
 Reopen an instance without preparing it again:
 
@@ -127,7 +210,7 @@ if let Some(instance) = launcher
 
 > [!NOTE]
 > `load_instance()` expects a complete local installation. Use `--local-only`
-> in the demo, or inspect before loading, when network access is unavailable.
+> in launchpad, or inspect before loading, when network access is unavailable.
 
 ## Driver Specifications
 
@@ -135,13 +218,23 @@ if let Some(instance) = launcher
 
 | Variant | Loader version |
 | --- | --- |
-| `Vanilla` | Game version only |
-| `Fabric`, `LegacyFabric`, `Babric`, `Quilt` | Game and loader version |
-| `LiteLoader`, `Rift` | Game and loader version |
-| `Forge`, `NeoForge`, `Cleanroom` | Game and loader version |
+| `DriverSpec::vanilla(game_version)` | Game version only |
+| `FABRIC_DRIVER`, `LEGACY_FABRIC_DRIVER`, `BABRIC_DRIVER`, `QUILT_DRIVER` | Game and loader version |
+| `LITELOADER_DRIVER`, `RIFT_DRIVER` | Game and loader version |
+| `FORGE_DRIVER`, `NEOFORGE_DRIVER`, `CLEANROOM_DRIVER`, `OUTLANDS_DRIVER` | Game and loader version |
 
-Loader variants use `LoaderSpec { game_version, loader_version }`. Both version
-fields accept strings through `Into`.
+Vanilla has no loader version and uses its own constructor. `DriverSpec::any()`
+is for loader-driven distributions and requires all three values:
+
+```rust
+use elemental_driver::descriptors::FABRIC_DRIVER;
+
+let driver = DriverSpec::any(
+    FABRIC_DRIVER,
+    "1.20.1".into(),
+    "0.16.0".into(),
+)?;
+```
 
 ## Launch Options
 
@@ -175,6 +268,35 @@ Use `root_layout()` and `instance_layout()` for custom layouts, or
 `with_layouts()` to replace both at once. `Launcher::new(storage_root,
 downloader)` is the shorthand when the base layouts are sufficient.
 
+### Origin Overrides
+
+`origin_overrides()` receives one configuration block per driver, so each
+driver keeps its own typed origin enum instead of collapsing them into a
+launcher-wide list. Overrides replace the base URL while preserving the
+upstream path suffix:
+
+```rust
+use elemental_driver::drivers::{
+    fabric::source::FabricOrigin,
+    vanilla::source::VanillaOrigin,
+};
+use elemental_launcher::Launcher;
+
+let launcher = Launcher::builder()
+    .origin_overrides(|origins| {
+        origins.vanilla().override_origin(
+            VanillaOrigin::Resources,
+            "https://mirror.example/assets".to_owned(),
+        )?;
+        origins.fabric().override_origin(
+            FabricOrigin::Maven,
+            "https://mirror.example/fabric-maven".to_owned(),
+        )?;
+        Ok(())
+    })?
+    .build();
+```
+
 > [!WARNING]
 > Preparing an instance may download metadata, libraries, assets, and loader
 > installers. Launching it requires a compatible local Java runtime unless an
@@ -190,5 +312,5 @@ downloader)` is the shorthand when the base layouts are sufficient.
   supplies the downloader.
 - [elemental-kit](https://github.com/ElectronicWave/Elemental/blob/main/README.md#the-elemental-kit-facade)
   re-exports this crate behind the `launcher` feature.
-- [demo](https://github.com/ElectronicWave/Elemental/blob/main/crates/demo/README.md)
+- [launchpad](https://github.com/ElectronicWave/Elemental/blob/main/crates/launchpad/README.md)
   shows the complete CLI flow.
