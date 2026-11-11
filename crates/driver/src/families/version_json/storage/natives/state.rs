@@ -9,7 +9,6 @@ use elemental_schema::mojang::piston::{PistonMetaData, PistonMetaLibrariesDownlo
 use crate::{
     error::Result,
     families::version_json::{
-        VersionJsonVersionStorageExt,
         extensions::PistonMetaLibrariesExt,
         layout::{VersionJsonInstanceLayout, VersionJsonRootLayout},
         resource::VersionJsonInstanceResource,
@@ -19,26 +18,29 @@ use crate::{
 };
 
 pub(super) struct NativesExpectation {
-    destination: PathBuf,
-    native_artifacts: Vec<String>,
+    pub(super) destination: PathBuf,
+    pub(super) native_artifacts: Vec<String>,
+}
+
+pub(super) struct NativeLibrarySource {
+    pub(super) artifact: PistonMetaLibrariesDownloadsArtifact,
+    pub(super) exclude: Vec<String>,
 }
 
 pub(super) fn expected_natives<L, VL>(
     storage: &Storage<VL, Storage<L>>,
-) -> Option<NativesExpectation>
+    metadata: &PistonMetaData,
+) -> Result<NativesExpectation>
 where
     L: VersionJsonRootLayout,
     VL: VersionJsonInstanceLayout,
 {
-    let metadata = VersionJsonVersionStorageExt::metadata(storage).ok()?;
     let rule_context = VersionJsonRuleContext::current();
-    let destination = storage
-        .try_get_resource(VersionJsonInstanceResource::Natives)
-        .ok()?;
+    let destination = storage.try_get_resource(VersionJsonInstanceResource::Natives)?;
 
-    Some(NativesExpectation {
+    Ok(NativesExpectation {
         destination,
-        native_artifacts: collect_native_artifact_paths(&metadata, &rule_context),
+        native_artifacts: collect_native_artifact_paths(metadata, &rule_context)?,
     })
 }
 
@@ -54,12 +56,13 @@ where
     VL: VersionJsonInstanceLayout,
 {
     let checked_at_unix_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+    let native_artifacts = collect_native_artifact_paths(metadata, rule_context)?;
     natives_state_store(&storage.path)
         .await?
         .set(|state| {
             state.value = NativesState {
                 path: destination.to_string_lossy().to_string(),
-                native_artifacts: collect_native_artifact_paths(metadata, rule_context),
+                native_artifacts,
                 extracted_files,
                 checked_at_unix_ms,
             };
@@ -83,23 +86,41 @@ pub(super) fn natives_state_matches(state: &NativesState, expected: &NativesExpe
 fn collect_native_artifact_paths(
     metadata: &PistonMetaData,
     rule_context: &VersionJsonRuleContext,
-) -> Vec<String> {
-    let mut paths = native_source_artifacts(metadata, rule_context)
-        .map(|artifact| artifact.path.clone())
+) -> Result<Vec<String>> {
+    let mut paths = native_library_sources(metadata, rule_context)?
+        .into_iter()
+        .map(|source| source.artifact.path)
         .collect::<Vec<String>>();
     paths.sort();
     paths.dedup();
-    paths
+    Ok(paths)
 }
 
-pub(super) fn native_source_artifacts<'a>(
-    metadata: &'a PistonMetaData,
-    rule_context: &'a VersionJsonRuleContext,
-) -> impl Iterator<Item = &'a PistonMetaLibrariesDownloadsArtifact> + 'a {
-    metadata
+pub(super) fn native_library_sources(
+    metadata: &PistonMetaData,
+    rule_context: &VersionJsonRuleContext,
+) -> Result<Vec<NativeLibrarySource>> {
+    let mut sources = Vec::new();
+    for library in metadata
         .libraries
         .iter()
         .filter(|library| library.is_allowed(rule_context))
-        .flat_map(|library| library.native_source_artifacts(rule_context.platform()))
-        .flatten()
+    {
+        let exclude = library
+            .extract
+            .as_ref()
+            .map(|extract| extract.exclude.clone())
+            .unwrap_or_default();
+        sources.extend(
+            library
+                .native_source_artifacts(rule_context.platform())?
+                .into_iter()
+                .map(|artifact| NativeLibrarySource {
+                    artifact,
+                    exclude: exclude.clone(),
+                }),
+        );
+    }
+
+    Ok(sources)
 }

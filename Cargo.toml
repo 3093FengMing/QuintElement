@@ -20,18 +20,30 @@ homepage = "https://github.com/ElectronicWave/Elemental"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+# Just for dev test and cli use
 anyhow = { version = "1.0.104" }
 async-trait = "0.1.92"
-dirs = { version = "7.0.0" }
+dirs = { version = "7" }
+erased-serde = "0.4.11"
 futures = "0.3.34"
 hex = "0.4.3"
-jiff = { version = "0.2.39", features = ["serde"] }
-regex = "1.13.1"
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "native-tls", "charset", "http2", "system-proxy"] }
-scc = { version = "3.8.8", features = ["serde"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+jiff = { version = "0.2.0", features = ["serde"] }
+nidhogg = { version = "0.3.0" }
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "json",
+    "multipart",
+    "stream",
+    "native-tls",
+    "charset",
+    "http2",
+    "system-proxy",
+] }
+scc = { version = "3.4.8", features = ["serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.148"
+# for validation
 sha1 = "0.11.0"
+sha2 = "0.11.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = [
     "rt",
@@ -43,7 +55,7 @@ tokio = { version = "1.54.1", features = [
     "sync",
     "time",
 ] }
-toml = "1.2.1"
+toml = "1.0.0"
 
 # https://github.com/microsoft/edit/blob/main/Cargo.toml
 # `opt-level = "s"` significantly reduces binary size.

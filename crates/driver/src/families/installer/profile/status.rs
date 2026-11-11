@@ -1,7 +1,5 @@
-use std::path::Path;
-
 use elemental_core::{
-    runtime::{RuntimeValidationMode, resolve_runtime},
+    runtime::{RuntimeResolver, distribution::Distribution},
     storage::Storage,
 };
 use elemental_infra::SafeRelativePath;
@@ -19,6 +17,7 @@ use crate::{
             storage::library_artifacts_present,
         },
     },
+    launch::{RuntimeOptions, resolve_prepared_version_runtime},
 };
 
 use super::{InstallerInstallStatus, InstallerStatePaths};
@@ -31,32 +30,25 @@ where
     L: VersionJsonRootLayout,
     VL: VersionJsonInstanceLayout,
 {
-    let artifact_paths = install_profile
-        .libraries
-        .iter()
-        .flat_map(installer_library_artifacts)
-        .map(|artifact| SafeRelativePath::parse(artifact.path.as_str()))
-        .collect::<std::result::Result<Vec<SafeRelativePath>, _>>()?;
+    let mut artifact_paths = Vec::new();
+    for library in &install_profile.libraries {
+        for artifact in installer_library_artifacts(library)? {
+            artifact_paths.push(SafeRelativePath::parse(artifact.path.as_str())?);
+        }
+    }
     library_artifacts_present(&instance.parent, artifact_paths)
 }
 
 pub async fn resolve_installer_processor_runtime<L, VL>(
     launch_version: &PreparedVersionJsonInstance<L, VL>,
-    runtime_executable_path: Option<&Path>,
-    runtime_validation: RuntimeValidationMode,
-    operation_name: &str,
-) -> Result<elemental_core::runtime::distribution::Distribution>
+    runtime_options: &RuntimeOptions,
+    runtime_resolver: &RuntimeResolver,
+) -> Result<Distribution>
 where
     L: VersionJsonRootLayout,
     VL: VersionJsonInstanceLayout,
 {
-    Ok(resolve_runtime(
-        launch_version.required_java_major_version(),
-        runtime_executable_path,
-        runtime_validation,
-        operation_name,
-    )
-    .await?)
+    resolve_prepared_version_runtime(launch_version, runtime_options, runtime_resolver).await
 }
 
 pub async fn installer_install_status<L, VL>(
@@ -82,7 +74,8 @@ where
             installer_artifact,
             install_profile,
             family_name,
-        )?,
+        )
+        .await?,
         launch_version_ready,
     })
 }

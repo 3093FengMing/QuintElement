@@ -9,6 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 license.workspace = true
 
+[features]
+serde = ["dep:serde"]
+
 [dependencies]
 async-trait = { workspace = true }
 futures = { workspace = true }
@@ -19,8 +22,5 @@ serde = { workspace = true, optional = true }
 sha1 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { version = "0.7.20", default-features = false, features = ["rt"] }
-zip = { version = "9.4.1", default-features = false, features = ["deflate"] }
-
-[features]
-serde = ["dep:serde"]
+tokio-util = { version = "0.7.17", default-features = false, features = ["rt"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }

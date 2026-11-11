@@ -2,10 +2,11 @@ use elemental_schema::fabric::{
     ProfileJson, ProfileLibrary, ProfileLibraryArtifact, ProfileLibraryDownloads,
 };
 
-use crate::{error::Result, inspect::ProfileIdPattern};
+use crate::{error::Result, inspect::ProfileIdPattern, maven::MavenCoordinate};
 
 use super::endpoints::RiftEndpoints;
 use super::release::RiftRelease;
+use super::with_trailing_slash;
 
 const RIFT_PROFILE_ID: ProfileIdPattern = ProfileIdPattern::new("-rift-");
 
@@ -21,7 +22,7 @@ pub(super) fn normalize_profile_json(
         .collect::<Result<Vec<ProfileLibrary>>>()?;
     let asset_url =
         endpoints.release_asset_url(release.tag_name.as_str(), release.asset_name.as_str())?;
-    let normalized_loader_library = build_loader_library(release, asset_url);
+    let normalized_loader_library = build_loader_library(release, asset_url)?;
     // Rift 1.13.2 embeds a transient JitPack coordinate, so pin the selected release jar directly.
     if let Some(index) = profile
         .libraries
@@ -39,7 +40,6 @@ pub(super) fn normalize_profile_json(
 
     Ok(profile)
 }
-
 fn normalize_profile_library(
     library: ProfileLibrary,
     endpoints: &RiftEndpoints,
@@ -52,7 +52,7 @@ fn normalize_profile_library(
     if library.url == "http://repo1.maven.org/maven2/" {
         let maven_central_url = endpoints.maven_central_url()?;
         return Ok(ProfileLibrary {
-            url: ensure_trailing_slash(maven_central_url.as_str()),
+            url: with_trailing_slash(maven_central_url.as_str()),
             ..library
         });
     }
@@ -67,15 +67,15 @@ fn normalize_profile_library(
     Ok(library)
 }
 
-fn build_loader_library(release: &RiftRelease, asset_url: String) -> ProfileLibrary {
-    let library_name = format!("org.dimdev:rift:{}", release.loader_version);
-    let artifact_path = format!(
-        "org/dimdev/rift/{}/{}-{}.jar",
-        release.loader_version, "rift", release.loader_version
-    );
+fn build_loader_library(release: &RiftRelease, asset_url: String) -> Result<ProfileLibrary> {
+    let coordinate = MavenCoordinate::parse_labeled(
+        &format!("org.dimdev:rift:{}", release.loader_version),
+        "rift loader library",
+    )?;
+    let artifact_path = coordinate.artifact_path();
 
-    ProfileLibrary {
-        name: library_name,
+    Ok(ProfileLibrary {
+        name: coordinate.to_string(),
         url: asset_url.clone(),
         downloads: Some(ProfileLibraryDownloads {
             artifact: Some(ProfileLibraryArtifact {
@@ -88,20 +88,21 @@ fn build_loader_library(release: &RiftRelease, asset_url: String) -> ProfileLibr
         }),
         natives: None,
         extract: None,
-    }
+    })
 }
 
 fn build_rift_mixin_library(endpoints: &RiftEndpoints) -> Result<ProfileLibrary> {
-    let artifact_path = format!(
-        "org/spongepowered/mixin/0.7.11-SNAPSHOT/mixin-{}.jar",
-        "0.7.11-20180703.121122-1"
-    );
+    let coordinate = MavenCoordinate::parse_labeled(
+        "org.spongepowered:mixin:0.7.11-SNAPSHOT",
+        "rift mixin library",
+    )?;
+    let artifact_path = coordinate.artifact_path_for_version("0.7.11-20180703.121122-1");
     let sponge_maven_url = endpoints.sponge_maven_url()?;
     let artifact_url = format!("{}/{artifact_path}", sponge_maven_url.trim_end_matches('/'));
 
     Ok(ProfileLibrary {
-        name: "org.spongepowered:mixin:0.7.11-SNAPSHOT".to_owned(),
-        url: ensure_trailing_slash(sponge_maven_url.as_str()),
+        name: coordinate.to_string(),
+        url: with_trailing_slash(sponge_maven_url.as_str()),
         downloads: Some(ProfileLibraryDownloads {
             artifact: Some(ProfileLibraryArtifact {
                 path: artifact_path,
@@ -119,12 +120,4 @@ fn build_rift_mixin_library(endpoints: &RiftEndpoints) -> Result<ProfileLibrary>
 fn is_rift_loader_library(library_name: &str) -> bool {
     library_name.starts_with("org.dimdev:rift:")
         || library_name.starts_with("com.github.Chocohead:Rift:")
-}
-
-fn ensure_trailing_slash(url: &str) -> String {
-    if url.is_empty() || url.ends_with('/') {
-        return url.to_owned();
-    }
-
-    format!("{url}/")
 }

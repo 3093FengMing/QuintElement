@@ -21,8 +21,8 @@ pub enum Error {
     #[error("unsupported driver id: '{id}'")]
     UnsupportedDriver { id: String },
 
-    #[error(transparent)]
-    Regex(#[from] regex::Error),
+    #[error("driver '{driver}' requires a loader version")]
+    LoaderVersionRequired { driver: String },
 
     #[error(transparent)]
     Infra(#[from] elemental_infra::error::Error),
@@ -35,6 +35,9 @@ pub enum Error {
 
     #[error(transparent)]
     Runtime(#[from] elemental_core::runtime::Error),
+
+    #[error("blocking task failed: {0}")]
+    BlockingTask(#[from] tokio::task::JoinError),
 
     #[error(transparent)]
     Launcher(#[from] elemental_core::launcher::Error),
@@ -92,23 +95,11 @@ pub enum Error {
         source: reqwest::Error,
     },
 
-    #[error("{source_name} resource exceeds the {limit} byte limit: {url}")]
-    ResourceTooLarge {
-        source_name: String,
-        url: String,
-        limit: usize,
-    },
-
-    #[error("{source_name} resource request timed out: {url}")]
-    ResourceTimeout {
-        source_name: String,
-        url: String,
-        #[source]
-        source: reqwest::Error,
-    },
-
     #[error("invalid {label} notation: {notation}")]
     InvalidNotation { label: String, notation: String },
+
+    #[error("maven library '{notation}' has neither downloads nor a repository url")]
+    MavenLibraryMissingSource { notation: String },
 
     #[error("{context} must use http or https: {url}")]
     UnsupportedUrlScheme { context: String, url: String },
@@ -162,18 +153,6 @@ pub enum Error {
 
     #[error("{context} has no parent directory: {}", path.display())]
     MissingParentDirectory { context: String, path: PathBuf },
-
-    #[error(
-        "copy native binary '{}' to '{}' failed",
-        source_path.display(),
-        target_path.display()
-    )]
-    CopyNativeBinary {
-        source_path: PathBuf,
-        target_path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
 
     #[error("installer coordinate has no file name: {notation}")]
     InstallerCoordinateFileNameMissing { notation: String },

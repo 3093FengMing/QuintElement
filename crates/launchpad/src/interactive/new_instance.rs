@@ -3,12 +3,13 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use elemental::{
     core::minecraft::MinecraftVersionId,
+    core::runtime::RuntimeResolver,
     driver::{
         catalog::{GameVersion, LoaderRelease},
         driver::DriverDescriptor,
         loader_version::LoaderVersionId,
     },
-    launcher::{DriverCatalog, LaunchOptions},
+    launcher::{DriverCatalog, LaunchOptions, RuntimeOptions},
 };
 use inquire::{Select, Text};
 
@@ -62,7 +63,7 @@ impl DriverContext {
         })
     }
 
-    async fn ensure_game_versions(&mut self) -> Result<()> {
+    async fn load_game_versions_once(&mut self) -> Result<()> {
         if !self.game_versions.is_empty() {
             return Ok(());
         }
@@ -98,6 +99,7 @@ impl DriverContext {
 
 struct NewInstanceWizard {
     storage_root: PathBuf,
+    runtime_resolver: RuntimeResolver,
     driver: Option<DriverContext>,
     game_version: Option<MinecraftVersionId>,
     loader_version: Option<LoaderVersionId>,
@@ -106,9 +108,10 @@ struct NewInstanceWizard {
 }
 
 impl NewInstanceWizard {
-    fn new(storage_root: PathBuf) -> Self {
+    fn new(storage_root: PathBuf, runtime_resolver: RuntimeResolver) -> Self {
         Self {
             storage_root,
+            runtime_resolver,
             driver: None,
             game_version: None,
             loader_version: None,
@@ -168,7 +171,7 @@ impl NewInstanceWizard {
             .driver
             .as_mut()
             .context("driver is missing from the wizard state")?;
-        driver.ensure_game_versions().await?;
+        driver.load_game_versions_once().await?;
 
         let defaults = driver.defaults;
         let starting_cursor = driver.game_version_cursor(self.game_version.as_ref());
@@ -276,8 +279,12 @@ impl NewInstanceWizard {
             .context("driver is missing from the wizard state")?;
         let defaults = driver.defaults;
         let descriptor = driver.descriptor;
-        let Some(runtime) =
-            runtime::prompt(defaults.runtime_major_version, &mut self.runtime_choice).await?
+        let Some(runtime) = runtime::prompt(
+            &self.runtime_resolver,
+            defaults.runtime_major_version,
+            &mut self.runtime_choice,
+        )
+        .await?
         else {
             return Ok(StepOutcome::Step(NewInstanceStep::InstanceName));
         };
@@ -291,13 +298,15 @@ impl NewInstanceWizard {
             .instance_name
             .take()
             .context("instance name is missing from the wizard state")?;
-        let options = LaunchOptions {
+        let runtime = RuntimeOptions {
             runtime_major_version: runtime.major_version,
+            runtime_override: runtime.distribution,
             runtime_validation: runtime.validation,
-            ..LaunchOptions::default()
         };
+        let options = LaunchOptions::default();
         Ok(StepOutcome::Finished(Box::new(LaunchpadConfig {
             spec,
+            runtime,
             options,
             runtime_paths: Vec::new(),
             storage_root: self.storage_root.clone(),
@@ -339,6 +348,11 @@ impl NewInstanceStep {
     }
 }
 
-pub(super) async fn prompt(storage_root: PathBuf) -> Result<Option<Box<LaunchpadConfig>>> {
-    NewInstanceWizard::new(storage_root).run().await
+pub(super) async fn prompt(
+    storage_root: PathBuf,
+    runtime_resolver: RuntimeResolver,
+) -> Result<Option<Box<LaunchpadConfig>>> {
+    NewInstanceWizard::new(storage_root, runtime_resolver)
+        .run()
+        .await
 }

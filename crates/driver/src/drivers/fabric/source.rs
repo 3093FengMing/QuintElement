@@ -1,5 +1,5 @@
 use elemental_core::minecraft::MinecraftVersionId;
-use elemental_schema::fabric::{GameVersion, LoaderProfile, ProfileJson};
+use elemental_schema::fabric::{GameVersion, LoaderProfile, LoaderVersion, ProfileJson};
 use serde::Deserialize;
 
 use crate::{
@@ -50,15 +50,7 @@ pub type FabricSource = LoaderMetaSource<FabricEndpoints>;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FabricLoaderListEntry {
-    pub loader: FabricLoaderListVersion,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-/// The loader fields needed to enumerate Fabric releases.
-pub struct FabricLoaderListVersion {
-    pub version: String,
-    #[serde(default)]
-    pub stable: Option<bool>,
+    pub loader: LoaderVersion,
 }
 
 impl FabricEndpoints {
@@ -137,13 +129,18 @@ impl LoaderMetaEndpoints for FabricEndpoints {
         game_version: MinecraftVersionId,
         version: Self::LoaderGameVersion,
     ) -> crate::catalog::LoaderRelease {
-        let stable = version.loader.stable.unwrap_or(false);
         crate::catalog::LoaderRelease::new(
             game_version,
             LoaderVersionId::from(version.loader.version),
         )
-        .with_description(Some(if stable { "Stable" } else { "Unstable" }.to_owned()))
-        .with_prerelease(Some(!stable))
+        .with_description(Some(
+            if version.loader.stable {
+                "Stable"
+            } else {
+                "Unstable"
+            }
+            .to_owned(),
+        ))
     }
 }
 

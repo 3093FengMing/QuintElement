@@ -17,6 +17,8 @@ spawning launch commands. Minecraft-specific installation logic lives in
   toolchain directories, Minecraft's bundled runtimes, and `JAVA_HOME`/`JRE_HOME`.
 - Explicit runtime selection with strict or disabled Java version validation.
 - Offline and Microsoft device-code authorizers.
+- Opt-in Yggdrasil authorizer through the `yggdrasil-auth` feature.
+- Account-level skin and cape queries and mutations for Microsoft and Yggdrasil.
 - `LaunchCommand` construction, process spawning, and streamed process logs.
 - SHA-1 helpers for files and in-memory data.
 
@@ -36,25 +38,30 @@ Create an offline credential and list the locally discovered Java runtimes:
 ```rust
 use anyhow::Result;
 use elemental_core::{
-    auth::{authorizer::Authorizer, authorizers::offline::OfflineAuthorizer},
+    auth::{
+        accounts::Account,
+        authorizers::{Authorizer, offline::OfflineAuthorizer},
+    },
     minecraft::MinecraftVersionId,
-    runtime::distribution::Distribution,
+    runtime::RuntimeResolver,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let credential = OfflineAuthorizer {
+    let account = OfflineAuthorizer {
         username: "Player".to_owned(),
     }
     .authorize()
     .await?;
+    let credential = account.credential().await?;
 
     println!("uuid: {}", credential.uuid);
 
     let game_version = MinecraftVersionId::from("1.20.1");
     println!("game version: {game_version}");
 
-    for runtime in Distribution::cached().await.into_iter().take(5) {
+    let resolver = RuntimeResolver::with_default_providers();
+    for runtime in resolver.distributions().await.into_iter().take(5) {
         println!("{}: {}", runtime.provider, runtime.executable().display());
     }
 
@@ -69,7 +76,7 @@ implements `Authorizer` for real accounts.
 
 | Module | Responsibility |
 | --- | --- |
-| `auth` | `Authorizer`, `UserCredential`, offline auth, and Microsoft device-code auth |
+| `auth` | `Account`, `Authorizer`, `Credential`, offline, Microsoft, and Yggdrasil auth |
 | `consts` | Platform-dependent constants shared by launcher code |
 | `hash` | Synchronous and asynchronous SHA-1 helpers |
 | `launcher` | `LaunchCommand` plus process spawning and log streaming |
@@ -77,6 +84,13 @@ implements `Authorizer` for real accounts.
 | `runtime` | Java runtime providers, distributions, and validation |
 | `storage` | Generic `Storage` and `Layout` resource resolution |
 | `version` | The tagged `Version<Tag>` identifier wrapper |
+
+### Feature Flags
+
+| Feature | Description |
+| --- | --- |
+| `yggdrasil-auth` | Enables the Yggdrasil account and authorizer, and `Credential::auth_server` |
+| `offline-server` | Enables `yggdrasil-auth` and re-exports nidhogg's offline server |
 
 ## Core Concepts
 
@@ -166,43 +180,61 @@ bundled runtimes. Candidate roots are canonicalized, deduplicated, and sorted
 by Java version. Runtimes without a `release` file are probed with a bounded
 timeout and a cleaned Java environment.
 
-```rust
-use elemental_core::runtime::{
-    RuntimeValidationMode, distribution::Distribution, resolve_runtime,
-};
+Use `RuntimeResolver` to own discovery and caching. `distributions()` returns
+every discovered runtime, and `resolve()` selects one by Java major version:
 
-let runtime = resolve_runtime(21, None, RuntimeValidationMode::Strict, "launch").await?;
+```rust
+use elemental_core::runtime::RuntimeResolver;
+
+let resolver = RuntimeResolver::with_default_providers();
+let runtime = resolver.resolve(21).await?;
 assert!(runtime.executable().is_file());
-# Ok::<_, anyhow::Error>(())
 ```
 
-Use `Distribution::cached()` to inspect every discovered runtime, or
-`Distribution::find_cached_by_java_major()` to select one by Java major
-version. An explicit executable can be passed to `resolve_runtime`; in strict
-mode its detected major version must match the requested version.
+Hosts can bypass discovery by setting `RuntimeOptions.runtime_override` to a
+`Distribution`. In strict mode its detected major version must match the
+required version; `RuntimeValidationMode::Disabled` skips that check.
+`elemental-launcher` injects one resolver per `Launcher` so different hosts can
+use different provider lists without sharing process-wide state.
 
 Custom runtime providers can reuse the public scanning helpers in
 `runtime::discovery`, including `find_runtime_homes()`,
 `find_runtime_homes_with_prefixes()`, and `is_runtime_home()`, instead of
 reimplementing Java runtime layout checks.
 
-> [!IMPORTANT]
-> `with_runtime_providers()` replaces the process-wide provider list. Call it
-> before the first `Distribution::cached()` call, because the cached discovery
-> result is not refreshed when providers change.
+Provider lists and their cache belong to a `RuntimeResolver`. There is no
+process-wide provider override, so independent resolvers can use different
+providers without sharing state.
 
 ### Authentication and launch processes
 
-`OfflineAuthorizer` derives a deterministic offline UUID and empty access
-token. `MicrosoftAuthorizer` runs the Microsoft device-code flow and accepts a
-verification callback so the host application can present the user code with
-its own UI.
+Authentication is split into two module trees. `auth::accounts` owns the
+`Account` trait, stable account identities, and the offline, Microsoft, and
+Yggdrasil account types. The Yggdrasil types require the
+`yggdrasil-auth` feature. `auth::authorizers` owns the `Authorizer` trait and
+the corresponding login flows. An `Authorizer` is a login entry point with a
+stable `id()` used for persistence and a human-readable `name()`.
+`OfflineAuthorizer` derives a deterministic offline UUID,
+`MicrosoftAuthorizer` runs the Microsoft device-code flow, and
+`YggdrasilAuthorizer` authenticates against an authlib-compatible API. An
+`Account` is the persisted result of authorization and can be refreshed; a
+`Credential` is the per-launch projection passed to the game and is never
+persisted.
+
+`Account::textures()` returns the current skin, available capes, and the
+texture kinds the account can upload. Microsoft accounts expose the owned cape
+inventory for selection; Yggdrasil accounts report the active cape and their
+`uploadableTextures` capabilities. Mutations are explicit:
+`upload_skin()`, `delete_skin()`, `upload_cape()`, `delete_cape()`, and
+`select_cape()`. Providers that do not support an operation return
+`auth::Error::TextureUnsupported`. Offline accounts have no remote textures;
+use nidhogg's offline server for local skin and cape files.
 
 A `LaunchCommand` contains the runtime, structured JVM and game arguments, the
 main class, environment variables, and optional working directory. It remains
 mutable before launch, so callers can append authentication-specific JVM
-arguments or other overrides. `spawn_command()` launches it directly, while
-`spawn_command_logged()` captures stdout and stderr as `LoggedChild` lines.
+arguments or other overrides. `spawn_command()` launches it directly and lets
+the child inherit the parent's stdout and stderr.
 
 ## Related Crates
 

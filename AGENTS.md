@@ -1,6 +1,14 @@
 ## Elemental
 
-Follow CONTRIBUTING.md for information on how to contribute to this project.
+Follow CONTRIBUTING.md for information on 
+how to contribute to this project.
+
+## Compatibility
+
+- Respect vanilla configuration
+- Respect loader configuration
+- Respect other launchers' configuration
+- Avoid modifying existing files whenever possible
 
 ## Commands
 
@@ -17,6 +25,8 @@ npx -y @codacy/codacy-mcp
 ```
 
 ## Code Style
+
+`Numquam ponenda est pluralitas sine necessitate”`
 
 Prefer to use default trait functions instead of batch of little functions.
 
@@ -54,3 +64,24 @@ impl MyTrait for MyStruct {
     }
 }
 ```
+
+## Refactoring
+
+- Combine loops, iterator chains, and helpers based on the operation; do not
+  apply one control-flow style everywhere.
+- Use loops for stateful traversal, early exits, fallible collection, and
+  mutation of owned state.
+- Use iterator chains for simple transformations and direct composition.
+- Extract a helper only when it names a real behavior or removes duplication.
+- Do not replace readable control flow with long `map`/`flatten`/`collect`
+  chains solely to satisfy a complexity metric.
+- Evaluate refactors by readability, ownership boundaries, and testability,
+  not by CCN alone.
+
+## Breaking Changes
+
+- Dare to make breaking changes when they remove dead compatibility layers or
+  simplify the design.
+- Do not preserve an obsolete API without an active consumer.
+- Always explicitly tell the user when a change is breaking, including the
+  affected API and the required migration.

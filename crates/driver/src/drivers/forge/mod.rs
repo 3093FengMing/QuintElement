@@ -35,20 +35,17 @@ impl MavenSpec for ForgeSpec {
 
     const SOURCE_NAME: &'static str = "forge source";
     const MAVEN_ORIGIN: ForgeOrigin = ForgeOrigin;
-    const GROUP_PATH: &'static str = "net/minecraftforge";
-    const COORDINATE_GROUP: &'static str = "net.minecraftforge";
+    const GROUP: &'static str = "net.minecraftforge";
     const ARTIFACT: &'static str = "forge";
 
     fn release(version: String) -> Option<(MinecraftVersionId, LoaderRelease)> {
-        let (game_version, loader_version) = version.split_once('-')?;
-        if game_version.is_empty() || loader_version.is_empty() {
-            return None;
-        }
+        let mut parts = version.split('-');
+        let game_version = parts.next()?;
+        let loader_version = parts.next()?;
         let game_version = MinecraftVersionId::from(game_version);
         Some((
             game_version.clone(),
-            LoaderRelease::new(game_version, LoaderVersionId::from(loader_version))
-                .with_prerelease(Some(loader_version.contains("beta"))),
+            LoaderRelease::new(game_version, LoaderVersionId::from(loader_version)),
         ))
     }
 }
@@ -105,26 +102,6 @@ const FORGE_IDENTITY: ProfiledDriverIdentity = ProfiledDriverIdentity::new(
 );
 
 pub type ForgeCatalog = InstallerMavenCatalog<ForgeEndpoints>;
-
-#[cfg(test)]
-mod catalog_tests {
-    use super::*;
-
-    #[test]
-    fn release_retains_prerelease_suffix_and_complete_game_version() {
-        let (game, release) = ForgeSpec::release("1.21.1-52.0.10-beta".to_owned()).unwrap();
-        assert_eq!(game.as_str(), "1.21.1");
-        assert_eq!(release.loader_version.as_str(), "52.0.10-beta");
-        assert_eq!(release.prerelease, Some(true));
-        assert_eq!(
-            ForgeSpec::release("1.21-51.0.33".to_owned())
-                .unwrap()
-                .1
-                .prerelease,
-            Some(false)
-        );
-    }
-}
 
 #[cfg(test)]
 mod compatibility_tests {

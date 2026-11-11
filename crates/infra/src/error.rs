@@ -11,11 +11,17 @@ pub enum Error {
     #[error("failed to read ZIP archive: {0}")]
     Zip(#[from] zip::result::ZipError),
 
+    #[error("ZIP symlink '{entry}' points outside the destination directory: {target}")]
+    ZipSymlinkEscapesDestination { entry: String, target: String },
+
     #[error("archive entry is not valid UTF-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
 
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
+
+    #[error("blocking task failed: {0}")]
+    BlockingJoin(#[from] tokio::task::JoinError),
 
     #[error("downloader max_concurrent_downloads must be greater than zero")]
     InvalidMaxConcurrentDownloads,

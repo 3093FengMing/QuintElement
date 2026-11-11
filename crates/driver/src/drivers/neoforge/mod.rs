@@ -38,8 +38,7 @@ impl MavenSpec for NeoForgeSpec {
 
     const SOURCE_NAME: &'static str = "neoforge source";
     const MAVEN_ORIGIN: NeoForgeOrigin = NeoForgeOrigin;
-    const GROUP_PATH: &'static str = "net/neoforged";
-    const COORDINATE_GROUP: &'static str = "net.neoforged";
+    const GROUP: &'static str = "net.neoforged";
     const ARTIFACT: &'static str = "neoforge";
 
     fn version(_game_version: &MinecraftVersionId, loader_version: &LoaderVersionId) -> String {
@@ -48,12 +47,10 @@ impl MavenSpec for NeoForgeSpec {
 
     fn release(version: String) -> Option<(MinecraftVersionId, LoaderRelease)> {
         let game_version = infer_neoforge_game_version(version.as_str())?;
-        let loader_version_is_prerelease = version.ends_with("-beta");
         Some((
             game_version.clone(),
             LoaderRelease::new(game_version, LoaderVersionId::from(version))
-                .with_description(Some(GAME_VERSION_HEURISTIC_DESCRIPTION.to_owned()))
-                .with_prerelease(Some(loader_version_is_prerelease)),
+                .with_description(Some(GAME_VERSION_HEURISTIC_DESCRIPTION.to_owned())),
         ))
     }
 }
@@ -128,6 +125,31 @@ const NEOFORGE_IDENTITY: ProfiledDriverIdentity = ProfiledDriverIdentity::new(
     NEOFORGE_VERSION_LIBRARIES,
     ProfileIdPattern::loader_prefixed("neoforge-"),
 );
+
+pub type NeoForgeCatalog = InstallerMavenCatalog<NeoForgeEndpoints>;
+
+fn infer_neoforge_game_version(loader_version: &str) -> Option<MinecraftVersionId> {
+    let core_version = loader_version.split('-').next().unwrap_or(loader_version);
+    let parts = core_version.split('.').collect::<Vec<&str>>();
+    let [major, minor, ..] = parts.as_slice() else {
+        return None;
+    };
+
+    let major_number = major.parse::<u32>().ok()?;
+    let minor_number = minor.parse::<u32>().ok()?;
+    if major_number >= 26 {
+        let patch_number = match parts.get(2) {
+            Some(patch) => patch.parse::<u32>().ok()?,
+            None => 0,
+        };
+
+        return Some(
+            MinecraftVersion::year_release(major_number, minor_number, patch_number).into_id(),
+        );
+    }
+
+    Some(MinecraftVersion::legacy_release(1, major_number, minor_number).into_id())
+}
 
 #[cfg(test)]
 mod compatibility_tests {
@@ -222,92 +244,33 @@ mod compatibility_tests {
             );
         }
     }
-}
 
-pub type NeoForgeCatalog = InstallerMavenCatalog<NeoForgeEndpoints>;
-
-fn infer_neoforge_game_version(loader_version: &str) -> Option<MinecraftVersionId> {
-    let core_version = loader_version
-        .strip_suffix("-beta")
-        .unwrap_or(loader_version);
-    let parts = core_version.split('.').collect::<Vec<&str>>();
-    if parts
-        .iter()
-        .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
-    {
-        return None;
-    }
-    let [major, minor, ..] = parts.as_slice() else {
-        return None;
-    };
-
-    let major_number = major.parse::<u32>().ok()?;
-    let minor_number = minor.parse::<u32>().ok()?;
-    if major_number >= 26 {
-        let [_, _, hotfix, _build] = parts.as_slice() else {
-            return None;
+    #[tokio::test]
+    async fn public_driver_inspection_uses_family_identity_rules() {
+        use crate::{
+            driver::Driver,
+            families::version_json::{BaseInstanceLayout, BaseRootLayout},
+            inspect::InstanceProbe,
         };
-        let patch_number = hotfix.parse::<u32>().ok()?;
 
-        return Some(
-            MinecraftVersion::year_release(major_number, minor_number, patch_number).into_id(),
-        );
-    }
-
-    if parts.len() != 3 {
-        return None;
-    }
-    // Mojang uses "1.21", rather than "1.21.0", for the base release.
-    if minor_number == 0 {
-        return Some(MinecraftVersionId::from(format!("1.{major_number}")));
-    }
-    Some(MinecraftVersion::legacy_release(1, major_number, minor_number).into_id())
-}
-
-#[cfg(test)]
-mod catalog_tests {
-    use super::*;
-
-    #[test]
-    fn releases_match_mojang_base_names_and_year_hotfixes() {
-        for (version, game, prerelease) in [
-            ("21.0.167", "1.21", false),
-            ("21.1.265", "1.21.1", false),
-            ("26.1.0.1-beta", "26.1", true),
-            ("26.1.1.4-beta", "26.1.1", true),
-            ("26.1.2.125", "26.1.2", false),
-            ("26.3.0.100", "26.3", false),
+        let driver = NeoForgeDriver::with_defaults();
+        for (id, expected) in [
+            ("custom-instance", None),
+            ("1.21.1-neoforge-21.1.265", Some("21.1.265")),
+            ("1.20.1-neoforge-21.1.265", None),
         ] {
-            let (game_version, release) = NeoForgeSpec::release(version.to_owned()).unwrap();
-            assert_eq!(game_version.as_str(), game);
-            assert_eq!(release.game_version, game_version);
-            assert_eq!(release.loader_version.as_str(), version);
-            assert_eq!(release.prerelease, Some(prerelease));
-        }
-    }
-
-    #[test]
-    fn release_inference_rejects_incomplete_or_unknown_formats() {
-        for version in [
-            "21",
-            "21.1",
-            "21.1.2.3",
-            "26.3.0",
-            "26.3.0.1.2",
-            "26..0.1",
-            "26.3.0../bad",
-            "26.3.0.0-alpha.1+snapshot-1",
-            "26.3.0.1-rc1",
-            "26.3.0.1-beta-extra",
-            "26.x.0.1",
-            "+26.3.0.1",
-            "26.3.x.1",
-            "26.3.0.x",
-        ] {
-            assert!(
-                NeoForgeSpec::release(version.to_owned()).is_none(),
-                "{version}"
-            );
+            let probe = InstanceProbe {
+                metadata: Some(metadata(
+                    id,
+                    &["net.neoforged.fancymodloader:loader:4.0.45"],
+                )),
+            };
+            let installed = Driver::<BaseRootLayout, BaseInstanceLayout>::inspect(&driver, &probe)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(installed.driver.id, "neoforge");
+            assert_eq!(installed.driver_version.as_deref(), expected);
         }
     }
 }

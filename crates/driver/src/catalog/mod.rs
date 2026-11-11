@@ -7,7 +7,6 @@ use elemental_core::minecraft::MinecraftVersionId;
 
 use crate::error::Result;
 
-pub use crate::http::ResourceLimits;
 pub use loader_meta::LoaderMetaCatalog;
 pub use maven::InstallerMavenCatalog;
 pub use release::{GameVersion, LoaderRelease};

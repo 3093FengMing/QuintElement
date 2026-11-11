@@ -7,7 +7,7 @@ use crate::{
 use elemental_core::minecraft::MinecraftVersionId;
 use serde::de::DeserializeOwned;
 
-use crate::http::{HttpSource, ResourceLimits};
+use crate::http::{HttpSource, fetch_json};
 
 pub trait LoaderMetaEndpoints: Clone + Debug + Send + Sync + 'static {
     type GameVersion: DeserializeOwned;
@@ -68,21 +68,14 @@ where
         self.inner.endpoints()
     }
 
-    /// Apply response-size and total-request bounds to metadata requests.
-    /// Oversized responses are rejected while streaming, before decoding them.
-    pub fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
-        self.inner = self.inner.with_resource_limits(limits);
-        self
-    }
-
     pub async fn game_versions(&self) -> Result<Vec<E::GameVersion>> {
         let url = self.endpoints().game_versions_url()?;
-        self.inner.fetch_json(url.as_str(), E::SOURCE_NAME).await
+        fetch_json(self.inner.client()?, url.as_str(), E::SOURCE_NAME).await
     }
 
     pub async fn loader_versions(&self, game_version: &str) -> Result<Vec<E::LoaderGameVersion>> {
         let url = self.endpoints().loader_versions_url(game_version)?;
-        self.inner.fetch_json(url.as_str(), E::SOURCE_NAME).await
+        fetch_json(self.inner.client()?, url.as_str(), E::SOURCE_NAME).await
     }
 
     pub async fn profile_json(
@@ -93,7 +86,7 @@ where
         let url = self
             .endpoints()
             .profile_json_url(game_version, loader_version)?;
-        self.inner.fetch_json(url.as_str(), E::SOURCE_NAME).await
+        fetch_json(self.inner.client()?, url.as_str(), E::SOURCE_NAME).await
     }
 }
 
@@ -109,6 +102,6 @@ where
         let url = self
             .endpoints()
             .loader_profile_url(game_version, loader_version)?;
-        self.inner.fetch_json(url.as_str(), E::SOURCE_NAME).await
+        fetch_json(self.inner.client()?, url.as_str(), E::SOURCE_NAME).await
     }
 }

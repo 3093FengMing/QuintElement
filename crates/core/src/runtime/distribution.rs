@@ -7,14 +7,13 @@ use futures::future::join_all;
 use futures::stream::{self, StreamExt};
 use tokio::fs;
 use tokio::process::Command;
-use tokio::sync::OnceCell;
 
 use crate::runtime::{
+    RuntimeValidationMode,
     error::{Error, Result},
-    provider::{RuntimeProvider, runtime_providers},
+    provider::RuntimeProvider,
 };
 
-static DISTRIBUTION_CACHE: OnceCell<Vec<Distribution>> = OnceCell::const_new();
 const JAVA_INFO_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const JAVA_INFO_PROBE_CONCURRENCY: usize = 8;
 const JAVA_PROBE_ENV_VARIABLES: &[&str] = &[
@@ -46,18 +45,15 @@ pub struct DistributionReleaseData {
 #[derive(Debug, Clone)]
 pub struct Distribution {
     // Release Data (when available)
-    pub release: Option<DistributionReleaseData>,
+    release: Option<DistributionReleaseData>,
 
     // Physical Data
     /// Path to the runtime installation
-    pub path: PathBuf,
-
-    /// Explicit executable path when launch should use a specific java/javaw binary
-    pub executable_override: Option<PathBuf>,
+    path: PathBuf,
 
     // Discovery Data
     /// Elemental Provider used to discover this runtime
-    pub provider: &'static str,
+    provider: &'static str,
 }
 
 impl DistributionReleaseData {
@@ -232,7 +228,54 @@ impl DistributionReleaseData {
 }
 
 impl Distribution {
-    pub async fn build_from_root(root: PathBuf, provider: &'static str) -> Result<Self> {
+    /// Build a distribution from properties already validated by the caller.
+    ///
+    /// The caller must use a controlled probe or another trusted source to
+    /// verify these properties against the selected Java executable. This
+    /// method only canonicalizes and checks the installation directory and
+    /// requires a recognizable Java major version. It does not read or write
+    /// a release file, discover runtimes, or launch a Java property probe.
+    ///
+    /// `provider` is a stable provenance label. The distribution's executable
+    /// remains `<root>/bin/java`; callers may retain a separately selected
+    /// executable when constructing their own process.
+    ///
+    /// Returns a typed error when the root cannot be inspected, is not a
+    /// directory, or the supplied properties have no recognizable major version.
+    pub async fn from_validated_root(
+        root: PathBuf,
+        release: DistributionReleaseData,
+        provider: &'static str,
+    ) -> Result<Self> {
+        let root =
+            fs::canonicalize(&root)
+                .await
+                .map_err(|source| Error::CanonicalizeRuntimeRoot {
+                    path: root.clone(),
+                    source,
+                })?;
+        let metadata =
+            fs::metadata(&root)
+                .await
+                .map_err(|source| Error::CanonicalizeRuntimeRoot {
+                    path: root.clone(),
+                    source,
+                })?;
+        if !metadata.is_dir() {
+            return Err(Error::CustomRuntimeNotDirectory { path: root });
+        }
+        if release.java_major_version().is_none() {
+            return Err(Error::RuntimeVersionUnknown { path: root });
+        }
+
+        Ok(Self {
+            release: Some(release),
+            path: root,
+            provider,
+        })
+    }
+
+    pub(crate) async fn build_from_root(root: PathBuf, provider: &'static str) -> Result<Self> {
         let requested_root = root.clone();
         let root =
             fs::canonicalize(&root)
@@ -251,36 +294,6 @@ impl Distribution {
         Ok(Self {
             release: Some(release),
             path: root,
-            executable_override: None,
-            provider,
-        })
-    }
-
-    pub async fn build_from_executable(
-        executable: PathBuf,
-        provider: &'static str,
-    ) -> Result<Self> {
-        let normalized_executable = Self::normalize_executable_path(executable)?;
-        let normalized_executable =
-            fs::canonicalize(&normalized_executable)
-                .await
-                .map_err(|source| Error::CanonicalizeExecutable {
-                    path: normalized_executable.clone(),
-                    source,
-                })?;
-        let runtime_root = Self::infer_runtime_root(&normalized_executable)?;
-
-        let release = DistributionReleaseData::parse(&runtime_root)
-            .await
-            .map_err(|source| Error::DetermineRuntimeProperties {
-                path: runtime_root.clone(),
-                source: Box::new(source),
-            })?;
-
-        Ok(Self {
-            release: Some(release),
-            path: runtime_root,
-            executable_override: Some(normalized_executable),
             provider,
         })
     }
@@ -335,15 +348,6 @@ impl Distribution {
         unique_distributions.into_iter().collect()
     }
 
-    pub async fn cached() -> Vec<Self> {
-        DISTRIBUTION_CACHE
-            .get_or_init(|| async {
-                Distribution::from_providers::<Vec<_>>(runtime_providers()).await
-            })
-            .await
-            .clone()
-    }
-
     pub fn matches_java_major_version(&self, major_version: usize) -> bool {
         self.release
             .as_ref()
@@ -356,58 +360,45 @@ impl Distribution {
             .and_then(DistributionReleaseData::java_major_version)
     }
 
-    pub async fn find_cached_by_java_major(major_version: usize) -> Option<Self> {
-        Self::cached()
-            .await
-            .into_iter()
-            .find(|distribution| distribution.matches_java_major_version(major_version))
+    pub fn release(&self) -> Option<&DistributionReleaseData> {
+        self.release.as_ref()
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn provider(&self) -> &'static str {
+        self.provider
     }
 
     pub fn executable(&self) -> PathBuf {
-        self.executable_override
-            .clone()
-            .unwrap_or_else(|| self.path.join("bin").join(format!("java{}", EXE_SUFFIX)))
+        self.path.join("bin").join(format!("java{EXE_SUFFIX}"))
     }
 
-    fn normalize_executable_path(executable: PathBuf) -> Result<PathBuf> {
-        let normalized = if executable.is_absolute() {
-            executable
-        } else {
-            std::env::current_dir()
-                .map_err(|source| Error::CurrentDir { source })?
-                .join(executable)
-        };
-
-        if !normalized.is_file() {
-            return Err(Error::ExecutableNotFile { path: normalized });
+    pub fn require_compatible(
+        &self,
+        required_major_version: usize,
+        validation_mode: RuntimeValidationMode,
+    ) -> Result<()> {
+        if validation_mode == RuntimeValidationMode::Disabled {
+            return Ok(());
         }
 
-        let executable_name = normalized
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| Error::ExecutableNoStem {
-                path: normalized.clone(),
-            })?;
-        if executable_name != "java" && executable_name != "javaw" {
-            return Err(Error::ExecutableNotJava { path: normalized });
+        let actual_major_version =
+            self.java_major_version()
+                .ok_or_else(|| Error::RuntimeVersionUnknown {
+                    path: self.path.clone(),
+                })?;
+        if actual_major_version != required_major_version {
+            return Err(Error::VersionMismatch {
+                actual: actual_major_version,
+                expected: required_major_version,
+                path: self.path.clone(),
+            });
         }
 
-        Ok(normalized)
-    }
-
-    fn infer_runtime_root(executable: &Path) -> Result<PathBuf> {
-        let bin_directory = executable
-            .parent()
-            .ok_or_else(|| Error::ExecutableNoParent {
-                path: executable.to_path_buf(),
-            })?;
-        let runtime_root = bin_directory
-            .parent()
-            .ok_or_else(|| Error::ExecutableNotInBin {
-                path: executable.to_path_buf(),
-            })?;
-
-        Ok(runtime_root.to_path_buf())
+        Ok(())
     }
 }
 
@@ -511,4 +502,116 @@ fn parse_properties_uses_exact_keys_and_unquotes_release_values() {
     assert_eq!(release.implementor.as_deref(), Some("Eclipse Adoptium"));
     assert_eq!(release.jre_version.as_deref(), Some("1.8.0_452"));
     assert_eq!(release.java_major_version(), Some(8));
+}
+
+#[cfg(test)]
+mod validated_root_tests {
+    use super::*;
+
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn new() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "elemental-validated-runtime-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn imports_validated_properties_without_release_or_java_probe() {
+        let root = TestRoot::new();
+        let release = DistributionReleaseData {
+            implementor: Some("controlled fixture".to_owned()),
+            architecture: Some("amd64".to_owned()),
+            major_version: Some("21".to_owned()),
+            jre_version: Some("21.0.12".to_owned()),
+            jvm_version: None,
+        };
+        let canonical_root = root.0.canonicalize().unwrap();
+        let distribution =
+            Distribution::from_validated_root(root.0.clone(), release.clone(), "Controlled")
+                .await
+                .unwrap();
+        assert_eq!(distribution.path(), canonical_root);
+        assert_eq!(distribution.provider(), "Controlled");
+        assert_eq!(distribution.java_major_version(), Some(21));
+        assert_eq!(
+            distribution.release().unwrap().jre_version.as_deref(),
+            Some("21.0.12")
+        );
+        assert_eq!(
+            distribution.executable(),
+            canonical_root.join("bin").join(format!("java{EXE_SUFFIX}"))
+        );
+        assert!(!distribution.executable().exists());
+        assert!(!root.0.join("release").exists());
+        distribution
+            .require_compatible(21, RuntimeValidationMode::Strict)
+            .unwrap();
+        assert!(matches!(
+            distribution.require_compatible(17, RuntimeValidationMode::Strict),
+            Err(Error::VersionMismatch {
+                actual: 21,
+                expected: 17,
+                ..
+            })
+        ));
+
+        let release_path = root.0.join("release");
+        let unrelated_release = b"JAVA_VERSION=\"17.0.1\"\n";
+        std::fs::write(&release_path, unrelated_release).unwrap();
+        let imported = Distribution::from_validated_root(root.0.clone(), release, "Controlled")
+            .await
+            .unwrap();
+        assert_eq!(imported.java_major_version(), Some(21));
+        assert_eq!(std::fs::read(release_path).unwrap(), unrelated_release);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_roots_and_unrecognizable_major_versions() {
+        let root = TestRoot::new();
+        let release = DistributionReleaseData {
+            major_version: Some("21".to_owned()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            Distribution::from_validated_root(
+                root.0.join("missing"),
+                release.clone(),
+                "Controlled"
+            )
+            .await,
+            Err(Error::CanonicalizeRuntimeRoot { .. })
+        ));
+        let file = root.0.join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(matches!(
+            Distribution::from_validated_root(file, release, "Controlled").await,
+            Err(Error::CustomRuntimeNotDirectory { .. })
+        ));
+        for major_version in [None, Some("unknown".to_owned())] {
+            let release = DistributionReleaseData {
+                major_version,
+                ..Default::default()
+            };
+            assert!(matches!(
+                Distribution::from_validated_root(root.0.clone(), release, "Controlled").await,
+                Err(Error::RuntimeVersionUnknown { .. })
+            ));
+        }
+    }
 }

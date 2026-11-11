@@ -38,11 +38,8 @@ pub struct QuiltLoaderListEntry {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-/// The loader fields needed to enumerate Quilt releases.
 pub struct QuiltLoaderListVersion {
     pub version: String,
-    #[serde(default)]
-    pub stable: Option<bool>,
 }
 
 impl QuiltEndpoints {
@@ -102,20 +99,10 @@ impl LoaderMetaEndpoints for QuiltEndpoints {
         game_version: MinecraftVersionId,
         version: Self::LoaderGameVersion,
     ) -> crate::catalog::LoaderRelease {
-        // Quilt's v3 API can omit `stable`; plain three-part numeric releases
-        // are stable, while explicit metadata takes precedence over this fallback.
-        let stable = version.loader.stable.unwrap_or_else(|| {
-            let parts = version.loader.version.split('.').collect::<Vec<_>>();
-            parts.len() == 3
-                && parts
-                    .iter()
-                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-        });
         crate::catalog::LoaderRelease::new(
             game_version,
             LoaderVersionId::from(version.loader.version),
         )
-        .with_prerelease(Some(!stable))
     }
 }
 

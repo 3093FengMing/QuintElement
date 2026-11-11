@@ -5,8 +5,8 @@ use crate::{
     error::Result,
     families::version_json::{
         PistonMetaLibrariesExt, VersionJsonInstanceLayout, VersionJsonInstanceResource,
-        VersionJsonRemoteResolver, VersionJsonRootLayout, VersionJsonRootResource,
-        VersionJsonRuleContext, storage::library_artifacts_present,
+        VersionJsonRemoteResolver, VersionJsonRootLayout, VersionJsonRuleContext,
+        storage::library_artifacts_present,
     },
 };
 
@@ -32,37 +32,21 @@ where
         if !self.libraries_ready(rule_context)? {
             return Ok(false);
         }
-        self.logging_config_ready()
+        Ok(true)
     }
 
     fn libraries_ready(&self, rule_context: &VersionJsonRuleContext) -> Result<bool> {
-        let artifact_paths = self
+        let mut artifact_paths = Vec::new();
+        for library in self
             .metadata
             .libraries
             .iter()
             .filter(|library| library.is_allowed(rule_context))
-            .flat_map(|library| library.version_artifacts(rule_context.platform()))
-            .flatten()
-            .map(|artifact| SafeRelativePath::parse(artifact.path.as_str()))
-            .collect::<std::result::Result<Vec<SafeRelativePath>, _>>()?;
+        {
+            for artifact in library.version_artifacts(rule_context.platform())? {
+                artifact_paths.push(SafeRelativePath::parse(artifact.path.as_str())?);
+            }
+        }
         library_artifacts_present(&self.version.parent, artifact_paths)
-    }
-
-    fn logging_config_ready(&self) -> Result<bool> {
-        let Some(client) = self
-            .metadata
-            .logging
-            .as_ref()
-            .and_then(|logging| logging.client.as_ref())
-        else {
-            return Ok(true);
-        };
-        Ok(self
-            .version
-            .parent
-            .try_get_resource(VersionJsonRootResource::AssetLogConfigs(Some(
-                SafeRelativePath::parse(client.file.id.as_str())?,
-            )))?
-            .exists())
     }
 }

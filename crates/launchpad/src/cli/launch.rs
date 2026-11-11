@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use elemental::{
     core::minecraft::MinecraftVersionId,
     driver::{driver::DriverDescriptor, loader_version::LoaderVersionId},
-    launcher::LaunchOptions,
+    launcher::{LaunchOptions, RuntimeOptions},
 };
 
 use crate::{
@@ -21,7 +21,6 @@ struct LaunchInput {
     runtime_major_version: Option<usize>,
     runtime_validation: RuntimeValidationArg,
     runtime_paths: Vec<PathBuf>,
-    runtime_executable_path: Option<PathBuf>,
     game_version: Option<MinecraftVersionId>,
     loader_version: Option<LoaderVersionId>,
     instance_name: Option<String>,
@@ -39,17 +38,18 @@ impl LaunchInput {
             .loader_version
             .or_else(|| defaults.loader_version.map(LoaderVersionId::from));
         let spec = build_spec(self.driver, game_version, loader_version)?;
-        let options = LaunchOptions {
+        let runtime = RuntimeOptions {
             runtime_major_version: self
                 .runtime_major_version
                 .or(defaults.runtime_major_version),
-            runtime_executable_path: self.runtime_executable_path,
             runtime_validation: self.runtime_validation.into_runtime_validation_mode(),
-            ..LaunchOptions::default()
+            ..RuntimeOptions::default()
         };
+        let options = LaunchOptions::default();
 
         Ok(LaunchpadConfig {
             spec,
+            runtime,
             options,
             runtime_paths: self.runtime_paths,
             storage_root: self.storage_root,
@@ -72,7 +72,6 @@ pub(super) fn build(
         runtime_major_version,
         runtime_validation,
         runtime_paths,
-        runtime_executable_path,
     } = arguments;
     let input = LaunchInput {
         driver: driver.unwrap_or_else(default_driver),
@@ -81,7 +80,6 @@ pub(super) fn build(
         runtime_major_version,
         runtime_validation: runtime_validation.unwrap_or_default(),
         runtime_paths,
-        runtime_executable_path,
         game_version: game_version.map(MinecraftVersionId::from),
         loader_version: loader_version.map(LoaderVersionId::from),
         instance_name,
